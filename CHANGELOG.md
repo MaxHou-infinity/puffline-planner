@@ -3,6 +3,14 @@
 本项目采用 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 与 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- 修复打包产物启动报 `No module named 'main'`：入口改为显式
+  `from src.main import main` 并声明 `src` 为常规包，PyInstaller
+  可静态收集全部模块；Windows 构建新增 EXE 启动冒烟检查
+
 ## [3.3.5] - 2026-08-24
 
 ### Added

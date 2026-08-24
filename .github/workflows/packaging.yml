@@ -73,7 +73,20 @@ jobs:
             --icon "assets/puffline-icon.ico" `
             --add-data "assets;assets" `
             --add-data "configs;configs" `
+            --disable-windowed-traceback `
             run.py
+
+      - name: Smoke test EXE startup
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\PuffLine-Planner\PuffLine-Planner.exe" -PassThru
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) {
+            Write-Error "PuffLine-Planner exited early with code $($p.ExitCode) (likely missing modules)"
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Output "EXE smoke ok"
 
       - name: Zip dist folder
         shell: pwsh

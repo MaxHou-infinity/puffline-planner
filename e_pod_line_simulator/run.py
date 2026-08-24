@@ -9,11 +9,10 @@
 import sys
 import os
 
-# 添加src目录到路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# 确保项目根目录在模块搜索路径中（源码运行时）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 运行主程序
 if __name__ == '__main__':
-    from main import main
+    from src.main import main
     main()
-

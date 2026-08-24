@@ -33,7 +33,7 @@ hiddenimports = (
 
 a = Analysis(
     [os.path.join(ROOT, "run.py")],
-    pathex=[],
+    pathex=[ROOT],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
