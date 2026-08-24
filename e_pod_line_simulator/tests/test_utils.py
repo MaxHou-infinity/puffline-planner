@@ -1,6 +1,7 @@
 """工具函数单元测试"""
 
 import logging
+import os
 
 import pandas as pd
 
@@ -18,15 +19,41 @@ from src.utils import (
     format_time,
     get_alert_color,
     get_status_color,
+    get_first_run_marker_path,
     import_from_excel,
     load_config,
     load_ui_config,
+    mark_first_run_done,
     save_config,
     save_ui_config,
+    should_show_first_run,
     setup_logger,
     validate_production_line,
     validate_station,
 )
+
+
+def test_first_run_marker(tmp_path):
+    marker = str(tmp_path / "first_run.json")
+    # 标记不存在：首次运行应展示引导
+    assert should_show_first_run(marker) is True
+    # 写入标记后不再展示
+    assert mark_first_run_done(marker) is True
+    assert should_show_first_run(marker) is False
+    # 标记内容可重复写入（幂等）
+    assert mark_first_run_done(marker) is True
+
+
+def test_first_run_marker_missing_parent_dir(tmp_path):
+    marker = str(tmp_path / "nested" / "deep" / "first_run.json")
+    assert mark_first_run_done(marker) is True
+    assert should_show_first_run(marker) is False
+
+
+def test_get_first_run_marker_path_is_absolute():
+    path = get_first_run_marker_path()
+    assert path.endswith("first_run.json")
+    assert os.path.isabs(path)
 
 
 def test_validate_station():

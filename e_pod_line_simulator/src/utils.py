@@ -15,6 +15,7 @@
 
 import json
 import os
+import sys
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import logging
@@ -32,6 +33,47 @@ from src.models import (
 )
 from src.theme import alert_color as _theme_alert_color
 from src.theme import status_color as _theme_status_color
+
+
+# ==================== 首次运行引导 ====================
+
+def get_app_data_dir(app_name: str = "PuffLinePlanner") -> str:
+    """返回应用用户数据目录（跨平台，不依赖第三方库）"""
+    home = Path.home()
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", str(home)))
+    elif sys.platform == "darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
+    path = base / app_name
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return str(path)
+
+
+def get_first_run_marker_path() -> str:
+    """首次运行标记文件路径（存在即视为已完成引导）"""
+    return os.path.join(get_app_data_dir(), "first_run.json")
+
+
+def should_show_first_run(marker_path: Optional[str] = None) -> bool:
+    """首次运行检测：标记文件不存在时返回 True（应展示引导）"""
+    return not os.path.exists(marker_path or get_first_run_marker_path())
+
+
+def mark_first_run_done(marker_path: Optional[str] = None) -> bool:
+    """写入首次运行标记；写入失败不阻塞启动，返回是否成功"""
+    target = marker_path or get_first_run_marker_path()
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump({"first_run_done": True}, f)
+        return True
+    except OSError:
+        return False
 
 
 # ==================== 文件I/O ====================

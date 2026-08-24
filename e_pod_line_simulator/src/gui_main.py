@@ -9,7 +9,7 @@ GUI主窗口 - 程序的主界面
 
 GUI布局：
 ┌─────────────────────────────────────────┐
-│ 菜单栏: 文件 | 编辑 | 仿真 | 分析 | 帮助 │
+│ 菜单栏: 文件 | 分析 | 方案 | 报告 | 帮助 │
 ├──────────┬──────────────────────────────┤
 │          │                              │
 │ 配置面板  │      2D产线画布              │
@@ -20,7 +20,7 @@ GUI布局：
 │ [删除]    │                              │
 ├──────────┴──────────────────────────────┤
 │ KPI仪表盘: 瓶颈产能 | 日产量 | 成本      │
-│ 控制按钮: [开始] [暂停] [重置] [速度]    │
+│ 控制按钮: [开始] [暂停] [停止] [速度]    │
 └─────────────────────────────────────────┘
 """
 
@@ -54,6 +54,9 @@ from src.gui_panels import (
 from src.utils import (
     validate_production_line,
     setup_logger,
+    get_first_run_marker_path,
+    mark_first_run_done,
+    should_show_first_run,
 )
 from src.scenario_manager import ScenarioManager
 from src.reporting import export_report
@@ -125,6 +128,11 @@ class MainWindow:
         # 未保存修改标记与快捷键
         self._dirty = False
         self._bind_shortcuts()
+
+        # V3.3.5：首次运行引导（本地 marker，老用户不打扰）
+        self._first_run_marker = get_first_run_marker_path()
+        if should_show_first_run(self._first_run_marker):
+            self.root.after(600, self._open_first_run_wizard)
         
         # 初始化一个默认产线（可选）
         # self._create_default_line()  # 暂时注释，避免导入问题
@@ -134,11 +142,11 @@ class MainWindow:
         创建菜单栏
         
         菜单栏包含：
-        - 文件：新建、打开、保存、退出
-        - 编辑：添加工序、删除工序
-        - 仿真：开始、暂停、停止
-        - 分析：方案对比、导出报告
-        - 帮助：使用说明、关于
+        - 文件：快速配置向导、保存方案、退出
+        - 分析：敏感性试算、批量试算、智能优化、人力规划
+        - 方案：方案管理/对比、KPI 历史趋势
+        - 报告：导出报告
+        - 帮助：使用说明、术语说明、分析指南、关于
         """
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -486,6 +494,12 @@ class MainWindow:
 
         if dialog.result.get("auto_start") and self.production_line.stations:
             self._btn_start_simulation()
+
+    def _open_first_run_wizard(self) -> None:
+        """首次运行：自动打开快速配置向导（完成或取消后不再自动弹出）"""
+        self.logger.info("首次运行：自动打开快速配置向导")
+        self._menu_wizard()
+        mark_first_run_done(self._first_run_marker)
     
     def _menu_analysis_guide(self) -> None:
         """分析菜单 - 分析指南（V3.3）"""
