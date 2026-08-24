@@ -209,8 +209,8 @@ class ConfigPanel(ttk.Frame):
         self.production_type_label.pack(side=tk.LEFT, padx=8)
         self.btn_glossary = ttk.Button(
             title_frame,
-            text="术语?",
-            width=6,
+            text="术语速查",
+            width=8,
             command=self._open_glossary,
         )
         self.btn_glossary.pack(side=tk.RIGHT, padx=5)

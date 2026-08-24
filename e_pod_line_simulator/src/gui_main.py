@@ -30,7 +30,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 from typing import Optional
 import threading
 
-from src.models import ProductionLine, Station, SimulationState
+from src.models import ProductionLine, ProductionType, Station, SimulationState
 from src.simulation import SimulationEngine
 from src.gui_canvas import CanvasView
 from src.gui_panels import (
@@ -62,7 +62,7 @@ from src.scenario_manager import ScenarioManager
 from src.reporting import export_report
 from src.sensitivity import run_sensitivity
 from src.history import append_snapshot, build_snapshot
-from src.theme import ToolTip, apply_theme, show_toast
+from src.theme import COLORS, ToolTip, apply_theme, show_toast
 from src.version import PRODUCT_NAME, __version__
 
 
@@ -228,6 +228,21 @@ class MainWindow:
         
         # 画布视图（2D可视化）
         canvas_frame = ttk.Frame(right_frame)
+
+        # V3.3.5：空产线引导横幅（无工序时显示，一键打开向导）
+        self.empty_banner = ttk.Frame(canvas_frame)
+        ttk.Label(
+            self.empty_banner,
+            text="还没有配置工序，点下方按钮一键生成示例产线：",
+            foreground=COLORS["text_secondary"],
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(
+            self.empty_banner,
+            text="打开快速配置向导",
+            command=self._menu_wizard,
+            style="Accent.TButton",
+        ).pack(side=tk.LEFT)
+
         canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         self.canvas_view = CanvasView(
@@ -344,13 +359,12 @@ class MainWindow:
         
         状态栏显示程序运行状态和提示信息
         """
-        self.status_bar = ttk.Label(
-            self.root,
-            text="就绪",
-            relief=tk.SUNKEN,
-            anchor=tk.W
-        )
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        status_frame = ttk.Frame(self.root)
+        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar = ttk.Label(status_frame, text="就绪", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.status_meta = ttk.Label(status_frame, text="", relief=tk.SUNKEN, anchor=tk.E)
+        self.status_meta.pack(side=tk.RIGHT, padx=(4, 0))
 
     def _set_default_panes(self) -> None:
         """设置三栏默认宽度（左 380 / 报警 290 / 中间自适应）"""
@@ -415,6 +429,8 @@ class MainWindow:
         
         当产线数据发生变化时，调用此方法更新所有显示
         """
+        has_stations = self.production_line is not None and bool(self.production_line.stations)
+        self._update_empty_banner(has_stations)
         if self.production_line is None:
             return
         
@@ -431,6 +447,35 @@ class MainWindow:
         
         # 更新KPI
         self._update_kpi()
+        self._update_status_meta()
+
+    def _update_empty_banner(self, has_stations: bool) -> None:
+        """空产线引导横幅：无工序时显示，有工序时隐藏"""
+        if not hasattr(self, 'empty_banner'):
+            return
+        if has_stations:
+            self.empty_banner.pack_forget()
+        else:
+            self.empty_banner.pack(
+                fill=tk.X, padx=5, pady=(5, 0), before=self.canvas_view
+            )
+
+    def _update_status_meta(self) -> None:
+        """状态栏右侧：当前生产类型与计量单位"""
+        if not hasattr(self, 'status_meta'):
+            return
+        if self.production_line is None:
+            self.status_meta.config(text="")
+            return
+        type_map = {
+            ProductionType.ASSEMBLY: "烟弹组装",
+            ProductionType.LIQUID_FILLING: "烟油灌装",
+            ProductionType.POUCH_PACKAGING: "尼古丁袋包装",
+        }
+        ptype = type_map.get(self.production_line.production_type, "烟弹组装")
+        self.status_meta.config(
+            text=f"生产类型：{ptype}　|　单位：{self.production_line.get_unit()}/h"
+        )
     
     def _update_kpi(self) -> None:
         """
