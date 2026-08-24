@@ -25,6 +25,7 @@ from src.utils import (
     load_ui_config,
     mark_first_run_done,
     parse_shift_params,
+    resolve_template_reset,
     save_config,
     save_ui_config,
     should_show_first_run,
@@ -85,6 +86,16 @@ def test_parse_shift_params_invalid():
             assert "工人时薪" in str(exc)
         else:
             raise AssertionError(f"应拒绝时薪：{wage!r}")
+
+
+def test_resolve_template_reset():
+    # 未导入 Excel：模板变更应直接重置
+    assert resolve_template_reset(False) is True
+    # 已导入 Excel：用户确认才重置，否则保留
+    assert resolve_template_reset(True, lambda: True) is True
+    assert resolve_template_reset(True, lambda: False) is False
+    # 无确认函数时保守不重置
+    assert resolve_template_reset(True) is False
 
 
 def test_validate_station():

@@ -27,7 +27,12 @@ from src.models import (
     JobRole,
     ProductionLine,
 )
-from src.utils import validate_station, get_alert_color, parse_shift_params
+from src.utils import (
+    validate_station,
+    get_alert_color,
+    parse_shift_params,
+    resolve_template_reset,
+)
 from src.scenario_manager import ScenarioManager
 from src.theme import (
     ALERT_ICONS,
@@ -3677,8 +3682,15 @@ class WizardDialog:
         self.break_minutes_var = tk.StringVar(value="60")
         self.wage_var = tk.StringVar(value="20.0")
         self.auto_start_var = tk.BooleanVar(value=True)
+        # V3.3.5：模板/类型变更追踪（Excel 导入保护 + 产线重建）
+        self.excel_imported = False
+        self._loading_template_var = False
+        self._last_template = "standard"
+        self._last_production_type = "assembly"
 
         self._create_widgets()
+        self.template_var.trace_add("write", self._on_template_change)
+        self.production_type_var.trace_add("write", self._on_template_change)
         self.dialog.bind('<Escape>', lambda e: self.dialog.destroy())
         self._show_step(0)
 
@@ -3859,10 +3871,54 @@ class WizardDialog:
         line, error = import_from_excel(path)
         if line:
             self.production_line = line
+            self.excel_imported = True
             self.excel_path_var.set(path)
             self.excel_label.config(text=f"已导入：{path}（{len(line.stations)} 个工序）", foreground="green")
+            # 同步第 1 步的选择状态，避免界面与实际产线不一致
+            type_keys = {
+                ProductionType.ASSEMBLY: "assembly",
+                ProductionType.LIQUID_FILLING: "liquid_filling",
+                ProductionType.POUCH_PACKAGING: "pouch_packaging",
+            }
+            self._loading_template_var = True
+            try:
+                self.production_type_var.set(type_keys.get(line.production_type, "assembly"))
+                self.template_var.set("blank")
+                self._last_production_type = self.production_type_var.get()
+                self._last_template = "blank"
+            finally:
+                self._loading_template_var = False
         else:
             messagebox.showerror("导入失败", error or "未知错误")
+
+    def _on_template_change(self, *_args) -> None:
+        """模板/生产类型变更：重置已生成的产线，避免旧配置残留。
+
+        若已导入 Excel，需用户确认后才会用新配置覆盖导入数据。
+        """
+        if self._loading_template_var:
+            return
+        if not resolve_template_reset(
+            self.excel_imported,
+            lambda: messagebox.askyesno(
+                "切换模板",
+                "已导入 Excel 产线。切换模板/生产类型将使用新配置并覆盖导入数据，是否继续？",
+            ),
+        ):
+            # 用户取消：恢复变更前的选择
+            self._loading_template_var = True
+            try:
+                self.template_var.set(self._last_template)
+                self.production_type_var.set(self._last_production_type)
+            finally:
+                self._loading_template_var = False
+            return
+        self._last_template = self.template_var.get()
+        self._last_production_type = self.production_type_var.get()
+        self.excel_imported = False
+        self.production_line = None
+        if hasattr(self, "excel_label"):
+            self.excel_label.config(text="未选择", foreground="gray")
 
     def _make_template_line(self) -> ProductionLine:
         """根据所选模板创建产线"""

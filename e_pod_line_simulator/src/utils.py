@@ -16,7 +16,7 @@
 import json
 import os
 import sys
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Callable, Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import logging
 
@@ -105,6 +105,21 @@ def parse_shift_params(
         raise ValueError(f"工人时薪必须大于 0，当前输入：{wage!r}")
 
     return hours, minutes, hourly_wage
+
+
+def resolve_template_reset(
+    excel_imported: bool, confirm: Optional[Callable[[], bool]] = None
+) -> bool:
+    """判断向导切换模板/生产类型时是否重置已生成的产线。
+
+    未导入 Excel 时直接重置（模板变更应重建产线）；
+    已导入 Excel 时需用户确认，确认函数返回 True 才重置。
+    """
+    if not excel_imported:
+        return True
+    if confirm is None:
+        return False
+    return bool(confirm())
 
 
 # ==================== 文件I/O ====================
