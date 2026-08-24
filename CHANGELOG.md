@@ -3,7 +3,7 @@
 本项目采用 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 与 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [3.3.6] - 2026-08-24
 
 ### Fixed
 
