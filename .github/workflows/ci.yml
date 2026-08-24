@@ -25,5 +25,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Run test suite
-        run: python -m pytest tests -q
+      - name: Run test suite with coverage gate
+        run: python -m pytest tests -q \
+          --cov=src.models --cov=src.simulation --cov=src.hr_planning \
+          --cov=src.optimizer --cov=src.sensitivity --cov=src.scenario_manager \
+          --cov=src.history --cov=src.reporting --cov=src.utils \
+          --cov=src.glossary --cov=src.version \
+          --cov-report=term --cov-fail-under=85
