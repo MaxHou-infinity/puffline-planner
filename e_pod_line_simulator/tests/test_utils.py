@@ -24,6 +24,7 @@ from src.utils import (
     load_config,
     load_ui_config,
     mark_first_run_done,
+    parse_shift_params,
     save_config,
     save_ui_config,
     should_show_first_run,
@@ -54,6 +55,36 @@ def test_get_first_run_marker_path_is_absolute():
     path = get_first_run_marker_path()
     assert path.endswith("first_run.json")
     assert os.path.isabs(path)
+
+
+def test_parse_shift_params_valid():
+    assert parse_shift_params("8", "60", "20.5") == (8.0, 60.0, 20.5)
+    assert parse_shift_params(" 8.5 ", "0", "20") == (8.5, 0.0, 20.0)
+
+
+def test_parse_shift_params_invalid():
+    # 非数字与越界值均给出明确字段提示
+    for hours in ("abc", "0", "-1", ""):
+        try:
+            parse_shift_params(hours, "60", "20")
+        except ValueError as exc:
+            assert "班次时长" in str(exc)
+        else:
+            raise AssertionError(f"应拒绝班次时长：{hours!r}")
+    for minutes in ("abc", "-5", ""):
+        try:
+            parse_shift_params("8", minutes, "20")
+        except ValueError as exc:
+            assert "休息时间" in str(exc)
+        else:
+            raise AssertionError(f"应拒绝休息时间：{minutes!r}")
+    for wage in ("abc", "0", "-1", ""):
+        try:
+            parse_shift_params("8", "60", wage)
+        except ValueError as exc:
+            assert "工人时薪" in str(exc)
+        else:
+            raise AssertionError(f"应拒绝时薪：{wage!r}")
 
 
 def test_validate_station():

@@ -27,7 +27,7 @@ from src.models import (
     JobRole,
     ProductionLine,
 )
-from src.utils import validate_station, get_alert_color
+from src.utils import validate_station, get_alert_color, parse_shift_params
 from src.scenario_manager import ScenarioManager
 from src.theme import (
     ALERT_ICONS,
@@ -3727,36 +3727,59 @@ class WizardDialog:
 
     def _build_page_template(self) -> None:
         """步骤 1：模板选择"""
+        ttk.Label(
+            self.page_template,
+            text="生产类型决定计量单位与关键参数；新手建议先选「标准产线」体验完整流程。",
+            foreground="gray",
+            wraplength=620,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 6))
+
         ttk.Label(self.page_template, text="选择生产类型：", font=('Arial', 10)).pack(
             anchor=tk.W, pady=(0, 5)
         )
         self.production_type_var = tk.StringVar(value="assembly")
+        type_hints = {
+            "assembly": "离散装配，计量单位：颗",
+            "liquid_filling": "液体/批量生产，计量单位：千克",
+            "pouch_packaging": "高速机台包装，计量单位：袋",
+        }
         for key, label in [
             ("assembly", "烟弹组装（离散装配）"),
             ("liquid_filling", "烟油灌装（液体/批量）"),
             ("pouch_packaging", "尼古丁袋包装（高速机台）"),
         ]:
-            ttk.Radiobutton(
+            radio = ttk.Radiobutton(
                 self.page_template,
                 text=label,
                 variable=self.production_type_var,
                 value=key,
-            ).pack(anchor=tk.W, pady=2)
+            )
+            radio.pack(anchor=tk.W, pady=2)
+            ToolTip(radio, type_hints[key])
         ttk.Separator(self.page_template, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
         ttk.Label(self.page_template, text="选择产线模板：", font=('Arial', 10)).pack(anchor=tk.W, pady=5)
+        template_hints = {
+            "simple": "3 工序快速体验，适合首次了解流程",
+            "standard": "5 工序均衡示例，推荐新手（默认）",
+            "complex": "8 工序贴近真实参数，适合正式评估",
+            "blank": "从零手动添加，适合已有明确配置",
+        }
         for key, label in [
             ("simple", "简单产线（3 工序）"),
             ("standard", "标准产线（5 工序）"),
             ("complex", "复杂产线（8 工序，真实参数）"),
             ("blank", "空白产线（手动添加）"),
         ]:
-            ttk.Radiobutton(
+            radio = ttk.Radiobutton(
                 self.page_template,
                 text=label,
                 variable=self.template_var,
                 value=key,
-            ).pack(anchor=tk.W, pady=3)
+            )
+            radio.pack(anchor=tk.W, pady=3)
+            ToolTip(radio, template_hints[key])
         ttk.Button(
             self.page_template,
             text="术语速查",
@@ -3781,20 +3804,39 @@ class WizardDialog:
     def _build_page_shift(self) -> None:
         """步骤 3：班次设置"""
         ttk.Label(self.page_shift, text="班次设置：", font=('Arial', 10)).pack(anchor=tk.W, pady=5)
+        ttk.Label(
+            self.page_shift,
+            text="以下参数用于计算日产能与人力成本。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(0, 6))
         form = ttk.Frame(self.page_shift)
         form.pack(fill=tk.X, pady=10)
 
         ttk.Label(form, text="班次时长(小时):").grid(row=0, column=0, sticky=tk.W, pady=5)
         ttk.Entry(form, textvariable=self.shift_hours_var, width=10).grid(row=0, column=1, padx=10)
+        ttk.Label(form, text="每班计划工作小时数", foreground="gray").grid(
+            row=0, column=2, sticky=tk.W
+        )
 
         ttk.Label(form, text="休息时间(分钟):").grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Entry(form, textvariable=self.break_minutes_var, width=10).grid(row=1, column=1, padx=10)
+        ttk.Label(form, text="班内休息总分钟（含用餐）", foreground="gray").grid(
+            row=1, column=2, sticky=tk.W
+        )
 
         ttk.Label(form, text="工人时薪(元/小时):").grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Entry(form, textvariable=self.wage_var, width=10).grid(row=2, column=1, padx=10)
+        ttk.Label(form, text="用于成本与人力规划估算", foreground="gray").grid(
+            row=2, column=2, sticky=tk.W
+        )
 
     def _build_page_finish(self) -> None:
         """步骤 4：完成"""
+        ttk.Label(
+            self.page_finish,
+            text="完成后可在左侧「工序配置」继续编辑工序细节。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(0, 5))
         self.summary_text = tk.Text(self.page_finish, height=12, width=70, state=tk.DISABLED)
         self.summary_text.pack(fill=tk.BOTH, expand=True, pady=5)
         ttk.Checkbutton(
@@ -3880,13 +3922,13 @@ class WizardDialog:
 
         # 完成：应用班次配置
         try:
-            shift_hours = int(self.shift_hours_var.get())
-            break_minutes = int(self.break_minutes_var.get())
-            wage = float(self.wage_var.get())
-            if shift_hours <= 0 or break_minutes < 0 or wage <= 0:
-                raise ValueError("班次参数不合法")
+            shift_hours, break_minutes, wage = parse_shift_params(
+                self.shift_hours_var.get(),
+                self.break_minutes_var.get(),
+                self.wage_var.get(),
+            )
         except ValueError as e:
-            messagebox.showerror("错误", f"班次参数错误：{e}")
+            messagebox.showerror("参数错误", str(e))
             return
 
         if self.production_line is None:

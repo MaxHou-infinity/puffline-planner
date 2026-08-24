@@ -76,6 +76,37 @@ def mark_first_run_done(marker_path: Optional[str] = None) -> bool:
         return False
 
 
+def parse_shift_params(
+    shift_hours: str, break_minutes: str, wage: str
+) -> Tuple[float, float, float]:
+    """解析快速配置向导的班次参数，返回 (班次时长, 休息分钟, 时薪)。
+
+    任一参数不合法时抛出 ValueError，消息指明具体字段，便于界面直接展示。
+    """
+    try:
+        hours = float(shift_hours.strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"班次时长必须是大于 0 的数字，当前输入：{shift_hours!r}")
+    if hours <= 0:
+        raise ValueError(f"班次时长必须大于 0，当前输入：{shift_hours!r}")
+
+    try:
+        minutes = float(break_minutes.strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"休息时间必须是非负数字（分钟），当前输入：{break_minutes!r}")
+    if minutes < 0:
+        raise ValueError(f"休息时间不能为负数，当前输入：{break_minutes!r}")
+
+    try:
+        hourly_wage = float(wage.strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"工人时薪必须是大于 0 的数字，当前输入：{wage!r}")
+    if hourly_wage <= 0:
+        raise ValueError(f"工人时薪必须大于 0，当前输入：{wage!r}")
+
+    return hours, minutes, hourly_wage
+
+
 # ==================== 文件I/O ====================
 
 def load_config(file_path: str) -> Optional[ProductionLine]:
