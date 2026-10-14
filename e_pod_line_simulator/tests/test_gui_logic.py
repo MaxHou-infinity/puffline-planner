@@ -7,7 +7,9 @@ from src.gui_main import MainWindow
 from src.gui_jobs import BackgroundJob
 
 from src.gui_canvas import compute_reorder_order
-from src.gui_panels import KPIDashboard, build_template_line, station_edit_fields
+from src.gui_panels import (
+    KPIDashboard, build_template_line, format_history_title, station_edit_fields,
+)
 from src.models import ProductionType
 
 
@@ -101,6 +103,11 @@ def test_actual_output_is_distinct_from_estimates():
     dashboard.actual_output_label = SimpleNamespace(config=lambda **kwargs: values.append(kwargs))
     dashboard.update_actual_output(1234)
     assert values == [{"text": "本次仿真产出：1,234 袋"}]
+
+
+def test_history_title_without_reference_is_not_empty():
+    assert format_history_title("日产量", "单位成本") == "日产量 vs 单位成本"
+    assert format_history_title("日产量", reference=12.5).endswith("当前值 12.50）")
 
 
 def test_compute_reorder_order_invalid():

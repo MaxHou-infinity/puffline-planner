@@ -25,6 +25,19 @@ COLORS = {
     'warning': '#FF9F0A',
     'info': '#0A84FF',
     'idle': '#E5E5EA',
+    'danger_dark': '#B3261E',
+    'connection': '#6B7280',
+    'chart_primary': '#1F6FEB',
+    'chart_secondary': '#2DA44E',
+    'chart_reference': '#B3261E',
+    'chart_text': '#555555',
+    'chart_muted': '#888888',
+    'chart_baseline': '#EAF2FF',
+    'button_primary': '#1F2329',
+    'button_primary_hover': '#3A3D45',
+    'danger_soft': '#FDEBEA',
+    'danger_soft_hover': '#F8D7D5',
+    'disabled_text': '#B9C4D4',
 }
 
 # 工序状态色（V1.2：柔和、语义清晰）
@@ -34,6 +47,13 @@ STATUS_COLORS = {
     'blocked': COLORS['danger'],
     'waiting': COLORS['warning'],
     'changeover': COLORS['info'],
+}
+STATUS_LABELS = {
+    'idle': '空闲',
+    'running': '运行',
+    'blocked': '堵塞',
+    'waiting': '等待',
+    'changeover': '换型',
 }
 
 # 工序状态浅色填充（节点卡片底色，避免整块高饱和）
@@ -162,25 +182,25 @@ def apply_theme(root) -> dict:
     # 主按钮：克制"墨色"，替代大蓝
     style.configure(
         'Primary.TButton',
-        background='#1F2329',
-        foreground='#FFFFFF',
+        background=COLORS['button_primary'],
+        foreground=COLORS['surface'],
         font=(family, 11),
         padding=(12, 6),
     )
     style.map(
         'Primary.TButton',
-        background=[('active', '#3A3D45')],
-        foreground=[('disabled', '#B9C4D4')],
+        background=[('active', COLORS['button_primary_hover'])],
+        foreground=[('disabled', COLORS['disabled_text'])],
     )
     # 危险按钮：软红色底 + 深红文字，避免文字/背景冲突
     style.configure(
         'Danger.TButton',
-        background='#FDEBEA',
-        foreground='#B3261E',
-        bordercolor='#B3261E',
+        background=COLORS['danger_soft'],
+        foreground=COLORS['danger_dark'],
+        bordercolor=COLORS['danger_dark'],
         padding=(12, 6),
     )
-    style.map('Danger.TButton', background=[('active', '#F8D7D5')])
+    style.map('Danger.TButton', background=[('active', COLORS['danger_soft_hover'])])
     style.configure(
         'Secondary.TButton',
         background=COLORS['surface'],
@@ -188,11 +208,13 @@ def apply_theme(root) -> dict:
         padding=(12, 6),
     )
     style.map('Secondary.TButton', background=[('active', COLORS['hover'])])
-    style.configure('Accent.TButton', background='#1F2329', foreground='#FFFFFF')
+    style.configure(
+        'Accent.TButton', background=COLORS['primary'], foreground=COLORS['surface']
+    )
     style.map(
         'Accent.TButton',
-        background=[('active', '#3A3D45')],
-        foreground=[('disabled', '#B9C4D4')],
+        background=[('active', COLORS['primary_hover'])],
+        foreground=[('disabled', COLORS['disabled_text'])],
     )
     style.configure(
         'Treeview',
@@ -202,7 +224,7 @@ def apply_theme(root) -> dict:
         rowheight=26,
         font=(family, 10),
         selectbackground=COLORS['primary'],
-        selectforeground=COLORS['inverse_text'] if 'inverse_text' in COLORS else '#FFFFFF',
+        selectforeground=COLORS['surface'],
     )
     style.configure(
         'Treeview.Heading',

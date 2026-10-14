@@ -128,6 +128,7 @@ class MainWindow:
         # 创建GUI组件
         self._create_menu_bar()  # 创建菜单栏
         self._create_main_layout()  # 创建主布局
+        self._update_empty_banner(False)
         self._create_status_bar()  # 创建状态栏
 
         # 未保存修改标记与快捷键
@@ -344,7 +345,7 @@ class MainWindow:
             control_frame,
             text="保存方案",
             command=self._btn_save_scenario,
-            style="Primary.TButton",
+            style="Secondary.TButton",
         )
         self.btn_save_scenario.pack(side=tk.LEFT, padx=5)
 
@@ -463,7 +464,9 @@ class MainWindow:
             return
         if has_stations:
             self.empty_banner.pack_forget()
+            self.btn_start.config(style="Accent.TButton")
         else:
+            self.btn_start.config(style="Secondary.TButton")
             self.empty_banner.pack(
                 fill=tk.X, padx=5, pady=(5, 0), before=self.canvas_view
             )
