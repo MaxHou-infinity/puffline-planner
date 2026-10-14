@@ -1,8 +1,10 @@
 """GUI 交互逻辑单元测试（不依赖显示环境）"""
 
 from types import SimpleNamespace
+from queue import Queue
 
 from src.gui_main import MainWindow
+from src.gui_jobs import BackgroundJob
 
 from src.gui_canvas import compute_reorder_order
 from src.gui_panels import build_template_line, station_edit_fields
@@ -34,6 +36,7 @@ def test_natural_completion_is_observed_on_tk_thread():
     window = MainWindow.__new__(MainWindow)
     engine = SimpleNamespace(is_running=False)
     window.simulation_engine = engine
+    window._analysis_busy = False
     calls = []
     window._finalize_simulation = lambda completed: calls.append(completed)
     window._poll_simulation_completion(engine)
@@ -55,12 +58,37 @@ def test_stop_always_stops_engine_when_snapshot_fails(monkeypatch):
     window.btn_changeover = window.speed_combo = window.status_bar = widget
     window.config_panel = SimpleNamespace(set_editable=lambda value: None)
     window.kpi_dashboard = SimpleNamespace(set_run_state=lambda state: None)
-    window.canvas_view = None
+    window.canvas_view = SimpleNamespace(
+        drag_enabled=False, update_production_line=lambda line: None
+    )
     monkeypatch.setattr(gui_main, "build_snapshot", lambda *args: (_ for _ in ()).throw(ValueError("bad")))
     monkeypatch.setattr(gui_main.messagebox, "showwarning", lambda *args: calls.append("warned"))
     window._btn_stop_simulation()
     assert calls == ["warned", "stopped"]
     assert window.simulation_engine is None
+
+
+def test_worker_states_are_coalesced_before_tk_update():
+    window = MainWindow.__new__(MainWindow)
+    engine = object()
+    states = []
+    window.simulation_engine = engine
+    window._state_queue = Queue(maxsize=1)
+    window.root = SimpleNamespace(after=lambda *args: None)
+    window._update_simulation_state = states.append
+    window._on_simulation_state_update(engine, "old")
+    window._on_simulation_state_update(engine, "new")
+    window._drain_simulation_states()
+    assert states == ["new"]
+
+
+def test_background_job_delivers_result_when_tk_polls():
+    values = []
+    owner = SimpleNamespace(winfo_exists=lambda: True, after=lambda *args: None)
+    job = BackgroundJob(owner, lambda progress: 7, values.append, values.append)
+    job.messages.put(("success", 7))
+    job._poll()
+    assert values == [7]
 
 
 def test_compute_reorder_order_invalid():

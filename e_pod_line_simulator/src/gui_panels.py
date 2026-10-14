@@ -74,6 +74,7 @@ from src.history import (
 from src.sensitivity import run_sweep
 from src.optimizer import _params_text, optimize
 from src.simulation import SimulationEngine
+from src.gui_jobs import BackgroundJob, set_dialog_busy
 
 
 def fuzzy_contains(text: str, query: str) -> bool:
@@ -2731,6 +2732,7 @@ class SweepDialog:
         self.dialog.grab_set()
         self._create_widgets()
         self.dialog.bind('<Escape>', lambda e: self._close())
+        self.dialog.protocol("WM_DELETE_WINDOW", self._close)
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
         y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
@@ -2803,6 +2805,9 @@ class SweepDialog:
         ttk.Button(main, text="开始试算", command=self._run).grid(
             row=4, column=0, columnspan=2, sticky=tk.W, pady=8
         )
+        self.busy_bar = ttk.Progressbar(main, mode="indeterminate", length=150)
+        self.busy_bar.grid(row=4, column=2, sticky=tk.W)
+        self.busy_bar.grid_remove()
 
         columns = ("label", "output", "daily", "unit_cost", "upph")
         self.tree = ttk.Treeview(main, columns=columns, show="headings", height=10)
@@ -2857,6 +2862,8 @@ class SweepDialog:
         ).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
 
     def _run(self) -> None:
+        if getattr(self, "_job_running", False):
+            return
         try:
             param = self._param_label_to_key.get(
                 self.param_var.get(), "worker_count"
@@ -2876,9 +2883,18 @@ class SweepDialog:
             if not values:
                 messagebox.showwarning("警告", "请填写取值列表")
                 return
-            self.dialog.config(cursor="watch")
-            self.dialog.update_idletasks()
-            base = SimulationEngine(copy.deepcopy(self.line)).run_sync(
+            line = copy.deepcopy(self.line)
+        except Exception as exc:
+            messagebox.showerror("试算失败", str(exc))
+            return
+
+        self._job_running = True
+        self._saved_states = set_dialog_busy(self.dialog, True)
+        self.busy_bar.grid()
+        self.busy_bar.start(10)
+
+        def work(progress):
+            base = SimulationEngine(copy.deepcopy(line)).run_sync(
                 duration_hours=duration
             )
             base_row = {
@@ -2889,10 +2905,20 @@ class SweepDialog:
                 "upph": base.kpis.get("upph", 0.0),
             }
             sweep_rows = run_sweep(
-                self.line, param, values,
+                line, param, values,
                 station_id=station_id, duration_hours=duration,
             )
-            self.rows = [base_row] + sweep_rows
+            return [base_row] + sweep_rows
+
+        def finish():
+            self.busy_bar.stop()
+            self.busy_bar.grid_remove()
+            set_dialog_busy(self.dialog, False, self._saved_states)
+            self._job_running = False
+
+        def success(rows):
+            finish()
+            self.rows = rows
             for item in self.tree.get_children():
                 self.tree.delete(item)
             for index, row in enumerate(self.rows):
@@ -2907,10 +2933,12 @@ class SweepDialog:
                     self.tree.item(item, tags=("baseline",))
             self.tree.tag_configure("baseline", background="#EAF2FF")
             self._draw_chart()
-        except Exception as e:
-            messagebox.showerror("试算失败", f"{e}\n\n详细日志：logs/app.log")
-        finally:
-            self.dialog.config(cursor="")
+
+        def error(exc):
+            finish()
+            messagebox.showerror("试算失败", f"{exc}\n\n详细日志：logs/app.log")
+
+        BackgroundJob(self.dialog, work, success, error).start()
 
     def _draw_chart(self) -> None:
         """批量试算折线图（V3.3）"""
@@ -3002,6 +3030,9 @@ class SweepDialog:
             messagebox.showerror("导出失败", f"{e}\n\n详细日志：logs/app.log")
 
     def _close(self) -> None:
+        if getattr(self, "_job_running", False):
+            messagebox.showinfo("正在试算", "请等待当前试算完成")
+            return
         self.dialog.destroy()
 
 
@@ -3032,6 +3063,7 @@ class OptimizeDialog:
         self.dialog.grab_set()
         self._create_widgets()
         self.dialog.bind('<Escape>', lambda e: self._close())
+        self.dialog.protocol("WM_DELETE_WINDOW", self._close)
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
         y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
@@ -3092,6 +3124,9 @@ class OptimizeDialog:
         ttk.Button(main, text="开始优化", command=self._run).grid(
             row=5, column=0, columnspan=2, sticky=tk.W, pady=10
         )
+        self.busy_bar = ttk.Progressbar(main, mode="indeterminate", length=150)
+        self.busy_bar.grid(row=5, column=2, sticky=tk.W)
+        self.busy_bar.grid_remove()
         self.progress_var = tk.StringVar(value="")
         ttk.Label(main, textvariable=self.progress_var).grid(
             row=6, column=0, columnspan=2, sticky=tk.W
@@ -3122,6 +3157,8 @@ class OptimizeDialog:
         ).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
     def _run(self) -> None:
+        if getattr(self, "_job_running", False):
+            return
         try:
             objective = self._objective_label_to_key.get(
                 self.objective_var.get(), "unit_cost"
@@ -3133,10 +3170,19 @@ class OptimizeDialog:
                 self.locked_listbox.get(index).split(" ")[0]
                 for index in self.locked_listbox.curselection()
             ]
-            self.dialog.config(cursor="watch")
-            self.dialog.update_idletasks()
+            line = copy.deepcopy(self.line)
+        except Exception as exc:
+            messagebox.showerror("优化失败", str(exc))
+            return
 
-            base = SimulationEngine(copy.deepcopy(self.line)).run_sync(
+        self._job_running = True
+        self._saved_states = set_dialog_busy(self.dialog, True)
+        self.busy_bar.grid()
+        self.busy_bar.start(10)
+        self.progress_var.set("正在计算基线...")
+
+        def work(progress):
+            base = SimulationEngine(copy.deepcopy(line)).run_sync(
                 duration_hours=duration
             )
             base_row = {
@@ -3153,14 +3199,10 @@ class OptimizeDialog:
             }
 
             def _progress(generation, total, best):
-                self.progress_var.set(
-                    f"正在优化：第 {generation}/{total} 代，"
-                    f"当前最优得分 {best:.1f}"
-                )
-                self.dialog.update_idletasks()
+                progress(f"正在优化：第 {generation}/{total} 代，当前最优得分 {best:.1f}")
 
             top = optimize(
-                self.line,
+                line,
                 objective=objective,
                 generations=generations,
                 population=population,
@@ -3168,6 +3210,17 @@ class OptimizeDialog:
                 locked_stations=locked,
                 progress_callback=_progress,
             )
+            return base_row, top
+
+        def finish():
+            self.busy_bar.stop()
+            self.busy_bar.grid_remove()
+            set_dialog_busy(self.dialog, False, self._saved_states)
+            self._job_running = False
+
+        def success(result):
+            finish()
+            base_row, top = result
             if not top:
                 messagebox.showwarning("提示", "未找到可行方案")
                 return
@@ -3201,10 +3254,15 @@ class OptimizeDialog:
                 actions=[("应用选中方案", lambda: self._apply_selected(dialog))],
             )
             self.progress_var.set("优化完成")
-        except Exception as e:
-            messagebox.showerror("优化失败", f"{e}\n\n详细日志：logs/app.log")
-        finally:
-            self.dialog.config(cursor="")
+
+        def error(exc):
+            finish()
+            messagebox.showerror("优化失败", f"{exc}\n\n详细日志：logs/app.log")
+
+        BackgroundJob(
+            self.dialog, work, success, error,
+            on_progress=lambda value: self.progress_var.set(value),
+        ).start()
 
     def _apply_selected(self, dialog) -> None:
         """把选中的 TOP 方案应用到当前产线（V3.3.1）"""
@@ -3239,6 +3297,9 @@ class OptimizeDialog:
         )
 
     def _close(self) -> None:
+        if getattr(self, "_job_running", False):
+            messagebox.showinfo("正在优化", "请等待当前优化完成")
+            return
         self.dialog.destroy()
 
 
