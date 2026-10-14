@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 from src.models import ProductionLine, Station, SimulationState
 from src.utils import get_status_color, CANVAS_WIDTH, CANVAS_HEIGHT, STATION_WIDTH, STATION_HEIGHT
-from src.theme import COLORS, status_soft, resolve_font_family
+from src.theme import COLORS, STATUS_LABELS, STATUS_SYMBOLS, status_soft, resolve_font_family
 
 
 def format_capacity_text(capacity: float, unit: str) -> str:
@@ -148,6 +148,7 @@ class CanvasView(tk.Canvas):
         self.station_positions: Dict[str, tuple] = {}  # 工序中心坐标
         self.station_cards: Dict[str, int] = {}  # 节点卡片ID
         self.status_strips: Dict[str, int] = {}  # 顶部状态条ID
+        self.status_texts: Dict[str, int] = {}
         self.bottleneck_badges: Dict[str, int] = {}  # 瓶颈徽标ID
         self.type_badge_id: Optional[int] = None
         self.batch_summary_ids: List[int] = []
@@ -164,6 +165,10 @@ class CanvasView(tk.Canvas):
         self._drop_indicator: Optional[int] = None
         self.drag_enabled = True  # 仿真运行中由主窗口置 False
         self._hover_station_id: Optional[str] = None
+        self.selected_station_id: Optional[str] = None
+        self._resize_after_id = None
+        self._bottleneck_id: Optional[str] = None
+        self._bottleneck_capacity = 0.0
         
         # 布局参数
         self.station_spacing = 200  # 工序间距（像素）
@@ -204,6 +209,7 @@ class CanvasView(tk.Canvas):
         self.station_positions.clear()
         self.station_cards.clear()
         self.status_strips.clear()
+        self.status_texts.clear()
         self.bottleneck_badges.clear()
         self.type_badge_id = None
         self.batch_summary_ids = []
@@ -234,11 +240,10 @@ class CanvasView(tk.Canvas):
         
         # 计算每行最大工序数（基于画布宽度）
         # 使用实际画布宽度，而不是固定值
-        canvas_width = self.winfo_reqwidth()  # 请求的宽度（实际可用宽度）
-        if canvas_width <= 1:  # 如果画布还没有初始化，使用当前画布宽度
-            canvas_width = self.winfo_width()
-        if canvas_width <= 1:  # 如果还是无效，使用默认宽度
-            canvas_width = CANVAS_WIDTH
+        canvas_width = self.winfo_width()
+        if canvas_width <= 1:
+            requested_width = self.winfo_reqwidth()
+            canvas_width = requested_width if requested_width > 1 else CANVAS_WIDTH
         
         available_width = canvas_width - 2 * self.start_x  # 可用宽度（减去左右边距）
         self.max_stations_per_row = max(1, int(available_width / self.station_spacing))
@@ -249,15 +254,14 @@ class CanvasView(tk.Canvas):
         
         # 计算起始Y坐标（居中显示所有行）
         # 使用实际画布高度
-        canvas_height = self.winfo_reqheight()  # 请求的高度（实际可用高度）
+        canvas_height = self.winfo_height()
         if canvas_height <= 1:
-            canvas_height = self.winfo_height()
-        if canvas_height <= 1:
-            canvas_height = CANVAS_HEIGHT
+            requested_height = self.winfo_reqheight()
+            canvas_height = requested_height if requested_height > 1 else CANVAS_HEIGHT
         
         total_height = (num_rows - 1) * self.station_row_height
         start_y = (canvas_height - total_height) // 2
-        start_y = max(50, start_y)  # 确保至少距离顶部50像素
+        start_y = max(75, start_y)  # leave room for the status legend
         
         # 蛇形布局：先计算所有工序的位置
         station_positions = {}  # 存储每个工序的坐标
@@ -291,6 +295,11 @@ class CanvasView(tk.Canvas):
             station_positions[station.id] = (x, y)
         self.station_positions = station_positions
         
+        # One bottleneck calculation per full redraw, rather than per station.
+        bottleneck = production_line.find_bottleneck()
+        self._bottleneck_id = bottleneck.id if bottleneck else None
+        self._bottleneck_capacity = bottleneck.get_capacity() if bottleneck else 0.0
+
         # 第二步：绘制所有工序节点
         for station in production_line.stations:
             pos = station_positions[station.id]
@@ -308,6 +317,9 @@ class CanvasView(tk.Canvas):
             self._draw_connection_curved(current_station.id, next_station.id, current_pos, next_pos)
 
         self._draw_type_badge()
+        self._draw_status_legend(canvas_width)
+        if self.selected_station_id in self.station_cards:
+            self.highlight_station(self.selected_station_id)
         self._draw_batch_summary()
 
     def _draw_type_badge(self) -> None:
@@ -432,6 +444,13 @@ class CanvasView(tk.Canvas):
             tags=(f"station_{station.id}", "station"),
         )
         self.status_strips[station.id] = strip_id
+        self.status_texts[station.id] = self.create_text(
+            rect_x1 + 15, rect_y1 + 9,
+            text=STATUS_SYMBOLS.get(station.current_status, '○'),
+            font=(family, 8, 'bold'),
+            fill=COLORS['text'],
+            tags=(f"station_{station.id}", "station"),
+        )
 
         # 绘制文本信息
         text_ids = []
@@ -441,6 +460,7 @@ class CanvasView(tk.Canvas):
             x, y - 24,
             text=station.name,
             font=(family, 12, 'bold'),
+            fill=COLORS['text'],
             tags=(f"station_{station.id}", "station")
         )
         text_ids.append(text_id1)
@@ -450,6 +470,7 @@ class CanvasView(tk.Canvas):
             x, y - 4,
             text=f"👥 {station.worker_count}人",
             font=(family, 10),
+            fill=COLORS['text'],
             tags=(f"station_{station.id}", "station")
         )
         text_ids.append(text_id2)
@@ -461,18 +482,19 @@ class CanvasView(tk.Canvas):
             x, y + 15,
             text=format_capacity_text(capacity, unit),
             font=(family, 10),
+            fill=COLORS['text'],
             tags=(f"station_{station.id}", "station")
         )
         text_ids.append(text_id3)
 
         # 负荷率（第四行）
         if self.production_line:
-            bottleneck_capacity = self.production_line.get_bottleneck_capacity()
-            utilization = station.get_utilization(bottleneck_capacity)
+            utilization = station.get_utilization(self._bottleneck_capacity)
             text_id4 = self.create_text(
                 x, y + 35,
                 text=f"📊 {utilization:.0%}",
                 font=(family, 10),
+                fill=COLORS['text'],
                 tags=(f"station_{station.id}", "station")
             )
             text_ids.append(text_id4)
@@ -480,18 +502,17 @@ class CanvasView(tk.Canvas):
         self.station_texts[station.id] = text_ids
 
         # 瓶颈徽标：右上角红色圆形
-        bottleneck = self.production_line.find_bottleneck() if self.production_line else None
-        if bottleneck and bottleneck.id == station.id:
+        if self._bottleneck_id == station.id:
             badge_id = self.create_oval(
                 rect_x2 - 18, rect_y1 + 18, rect_x2 - 4, rect_y1 + 32,
-                fill=COLORS['danger'],
+                fill=COLORS['danger_dark'],
                 outline='',
                 tags=(f"station_{station.id}", "station"),
             )
             self.create_text(
                 rect_x2 - 11, rect_y1 + 25,
                 text="!",
-                fill='white',
+                fill=COLORS['surface'],
                 font=(family, 10, 'bold'),
                 tags=(f"station_{station.id}", "station"),
             )
@@ -575,7 +596,7 @@ class CanvasView(tk.Canvas):
             # 绘制曲线
             line_id = self.create_line(
                 *points,
-                fill='gray',
+                fill=COLORS['connection'],
                 width=2,
                 smooth=True,  # 平滑曲线
                 tags=(f"connection_{from_station_id}_{to_station_id}", "connection")
@@ -603,7 +624,7 @@ class CanvasView(tk.Canvas):
                     end_x - arrow_dx + perp_x, end_y - arrow_dy + perp_y,
                     end_x, end_y,
                     end_x - arrow_dx - perp_x, end_y - arrow_dy - perp_y,
-                    fill='gray',
+                    fill=COLORS['connection'],
                     width=2,
                     tags=(f"connection_{from_station_id}_{to_station_id}", "connection")
                 )
@@ -612,7 +633,7 @@ class CanvasView(tk.Canvas):
             line_id = self.create_line(
                 start_x, start_y,
                 end_x, end_y,
-                fill='gray',
+                fill=COLORS['connection'],
                 width=2,
                 arrow=tk.LAST,  # 在终点绘制箭头
                 arrowshape=(10, 12, 3),
@@ -643,8 +664,8 @@ class CanvasView(tk.Canvas):
         wip_id = self.create_text(
             wip_x, wip_y,
             text=f"WIP: 0 {self.production_line.get_unit() if self.production_line else '颗'}",
-            font=('Arial', 9),
-            fill='blue',
+            font=(resolve_font_family(), 9),
+            fill=COLORS['chart_primary'],
             tags=(f"wip_{from_station_id}_{to_station_id}", "wip")
         )
         self.wip_labels[f"{from_station_id}_{to_station_id}"] = wip_id
@@ -680,6 +701,12 @@ class CanvasView(tk.Canvas):
                 )
             if station.id in self.status_strips:
                 self.itemconfig(self.status_strips[station.id], fill=color)
+            if station.id in self.status_texts:
+                self.itemconfig(
+                    self.status_texts[station.id],
+                    text=STATUS_SYMBOLS.get(status, status),
+                    fill=COLORS['text'],
+                )
 
             # 更新产能文本（如果有变化）
             if station.id in self.station_texts and len(self.station_texts[station.id]) >= 3:
@@ -704,6 +731,18 @@ class CanvasView(tk.Canvas):
         # 刷新批次状态（烟油）
         if self.production_line.production_type and self.production_line.production_type.value == "liquid_filling":
             self.refresh_batch_summary()
+
+    def _draw_status_legend(self, canvas_width: int) -> None:
+        """A compact legend that does not rely on color alone."""
+        family = resolve_font_family()
+        x = max(12, canvas_width - 340)
+        for status in ('idle', 'running', 'waiting', 'blocked', 'changeover'):
+            self.create_oval(x, 11, x + 9, 20, fill=get_status_color(status), outline='')
+            self.create_text(
+                x + 13, 15, anchor=tk.W, text=STATUS_LABELS[status],
+                font=(family, 8), fill=COLORS['text_secondary'],
+            )
+            x += 66
     
     def highlight_station(self, station_id: str) -> None:
         """
@@ -712,6 +751,7 @@ class CanvasView(tk.Canvas):
         Args:
             station_id: 工序ID
         """
+        self.selected_station_id = station_id
         # 先取消所有高亮
         for station in self.production_line.stations if self.production_line else []:
             if station.id in self.station_cards:
@@ -850,13 +890,15 @@ class CanvasView(tk.Canvas):
             return
         # 重置上一悬停节点
         if self._hover_station_id and self._hover_station_id in self.station_cards:
+            selected = self._hover_station_id == self.selected_station_id
             self.itemconfig(
                 self.station_cards[self._hover_station_id],
-                outline=COLORS['border'],
-                width=1.5,
+                outline=COLORS['primary'] if selected else COLORS['border'],
+                width=3 if selected else 1.5,
             )
         self._hover_station_id = station_id
-        if station_id and station_id in self.station_cards and self.drag_enabled:
+        if (station_id and station_id in self.station_cards and self.drag_enabled
+                and station_id != self.selected_station_id):
             self.itemconfig(
                 self.station_cards[station_id],
                 outline=COLORS['focus'],
@@ -896,9 +938,9 @@ class CanvasView(tk.Canvas):
         
         # 如果已有产线数据，重新绘制
         if self.production_line:
-            # 延迟重绘，避免频繁触发（防抖）
-            # 使用after_idle确保在事件处理完成后重绘
-            self.after_idle(self._redraw_production_line)
+            if self._resize_after_id is not None:
+                self.after_cancel(self._resize_after_id)
+            self._resize_after_id = self.after(120, self._redraw_production_line)
     
     def _redraw_production_line(self) -> None:
         """
@@ -906,6 +948,7 @@ class CanvasView(tk.Canvas):
         
         这个方法与update_production_line类似，但专门用于窗口大小变化时的重绘
         """
+        self._resize_after_id = None
         if not self.production_line:
             return
         

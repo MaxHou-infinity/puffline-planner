@@ -5,6 +5,7 @@ import pytest
 from src.models import (
     Batch,
     BatchStatus,
+    Alert,
     CollaborationType,
     JobRole,
     ProductionLine,
@@ -41,6 +42,12 @@ def test_station_capacity_parallel():
     station = make_station()
     expected = (3600 / 25) * 2 * 0.85 * 0.95 * (1 - 45 / 480)
     assert station.get_capacity() == pytest.approx(expected, rel=1e-6)
+
+
+def test_alert_severity_is_normalized_for_filtering():
+    alert = Alert("material_shortage", " WARNING ", "", "缺料")
+    assert alert.severity == "warning"
+    assert alert.to_dict()["severity"] == "warning"
 
 
 def test_station_capacity_collaborative_ignores_workers():

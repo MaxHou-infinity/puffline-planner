@@ -74,6 +74,7 @@ from src.history import (
 from src.sensitivity import run_sweep
 from src.optimizer import _params_text, optimize
 from src.simulation import SimulationEngine
+from src.gui_jobs import BackgroundJob, set_dialog_busy
 
 
 def fuzzy_contains(text: str, query: str) -> bool:
@@ -94,6 +95,14 @@ def fuzzy_contains(text: str, query: str) -> bool:
         if position < len(query_lower) and char == query_lower[position]:
             position += 1
     return position == len(query_lower)
+
+
+def format_history_title(primary: str, comparison: str = "", reference=None) -> str:
+    """Build a useful title even when there is no current-line reference."""
+    title = primary + (f" vs {comparison}" if comparison else "")
+    if reference is not None:
+        title += f"（红虚线=当前值 {reference:.2f}）"
+    return title
 
 
 def build_template_line(key: str) -> ProductionLine:
@@ -204,12 +213,12 @@ class ConfigPanel(ttk.Frame):
         # 标题 + 术语速查
         title_frame = ttk.Frame(self)
         title_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(title_frame, text="工序配置", font=('Arial', 12, 'bold')).pack(side=tk.LEFT, padx=5)
+        ttk.Label(title_frame, text="工序配置", font=(resolve_font_family(), 12, 'bold')).pack(side=tk.LEFT, padx=5)
         self.production_type_label = ttk.Label(
             title_frame,
             text="类型：烟弹组装",
             foreground=COLORS['text_secondary'],
-            font=('Arial', 9),
+            font=(resolve_font_family(), 9),
         )
         self.production_type_label.pack(side=tk.LEFT, padx=8)
         self.btn_glossary = ttk.Button(
@@ -430,12 +439,12 @@ class KPIDashboard(ttk.LabelFrame):
         timestamp_frame = ttk.Frame(self)
         timestamp_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(timestamp_frame, text="仿真时间:", font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+        ttk.Label(timestamp_frame, text="仿真时间:", font=(resolve_font_family(), 10)).pack(side=tk.LEFT, padx=5)
         self.timestamp_label = ttk.Label(
             timestamp_frame,
             text="0.0 分钟",
-            font=('Arial', 12, 'bold'),
-            foreground='green'
+            font=(resolve_font_family(), 12, 'bold'),
+            foreground=COLORS['success']
         )
         self.timestamp_label.pack(side=tk.LEFT, padx=5)
 
@@ -443,8 +452,8 @@ class KPIDashboard(ttk.LabelFrame):
         self.run_state_label = ttk.Label(
             timestamp_frame,
             text="● 已停止",
-            font=('Arial', 10, 'bold'),
-            foreground='gray',
+            font=(resolve_font_family(), 10, 'bold'),
+            foreground=COLORS['text_secondary'],
         )
         self.run_state_label.pack(side=tk.RIGHT, padx=5)
         
@@ -524,6 +533,15 @@ class KPIDashboard(ttk.LabelFrame):
             foreground=COLORS['text_secondary'],
         )
         self.v13_label.pack(fill=tk.X, pady=(4, 0))
+        self.actual_output_label = ttk.Label(
+            self, text="本次仿真产出：--", foreground=COLORS['text_secondary'],
+        )
+        self.actual_output_label.pack(fill=tk.X, pady=(2, 0))
+
+    def update_actual_output(self, output: int) -> None:
+        """Show simulated output separately from formula-based estimates."""
+        unit = getattr(self, "current_unit", "颗")
+        self.actual_output_label.config(text=f"本次仿真产出：{output:,} {unit}")
     
     def update_timestamp(self, minutes: float) -> None:
         """
@@ -550,9 +568,9 @@ class KPIDashboard(ttk.LabelFrame):
         if not hasattr(self, 'run_state_label'):
             return
         state_map = {
-            'running': ('● 运行中', '#34C759'),
-            'paused': ('⏸ 已暂停', '#FF9F0A'),
-            'stopped': ('■ 已停止', '#6B7280'),
+            'running': ('● 运行中', COLORS['success']),
+            'paused': ('⏸ 已暂停', COLORS['warning']),
+            'stopped': ('■ 已停止', COLORS['text_secondary']),
         }
         text, color = state_map.get(state, state_map['stopped'])
         self.run_state_label.config(text=text, foreground=color)
@@ -616,13 +634,14 @@ class KPIDashboard(ttk.LabelFrame):
         if not hasattr(self, 'kpi_name_labels'):
             return
         label_map = {
-            'bottleneck_capacity': ('瓶颈产能', f'{unit}/h'),
+            'bottleneck_capacity': ('预计瓶颈产能', f'{unit}/h'),
             'daily_output': ('预计日产量', unit),
-            'total_cost': ('日成本', '元'),
-            'unit_cost': ('单位成本', f'元/{unit}'),
-            'balance_rate': ('产线平衡率', '%'),
-            'upph': ('UPPH', f'{unit}/人·h'),
+            'total_cost': ('预计日成本', '元'),
+            'unit_cost': ('预计单位成本', f'元/{unit}'),
+            'balance_rate': ('预计平衡率', '%'),
+            'upph': ('预计 UPPH', f'{unit}/人·h'),
         }
+        self.current_unit = unit
         for key, (name, unit_text) in label_map.items():
             if key in self.kpi_name_labels:
                 self.kpi_name_labels[key].config(text=name)
@@ -771,7 +790,7 @@ class AlertPanel(ttk.LabelFrame):
         top.clipboard_clear()
         top.clipboard_append(content)
         self.btn_copy_alerts.config(text="✅ 已复制")
-        self.after(1200, lambda: self.btn_copy_alerts.config(text="📋 复制报警"))
+        self.after(1200, lambda: self.btn_copy_alerts.config(text="📋 复制"))
 
     def recolor(self) -> None:
         """按当前主题刷新报警级别颜色（V3.0）"""
@@ -1326,8 +1345,8 @@ class SaveScenarioDialog:
         info_label = ttk.Label(
             main_frame,
             text=f"当前已保存 {self.scenario_manager.get_scenario_count()}/{self.scenario_manager.MAX_SCENARIOS} 个方案",
-            font=('Arial', 9),
-            foreground='gray'
+            font=(resolve_font_family(), 9),
+            foreground=COLORS['text_secondary']
         )
         info_label.grid(row=3, column=0, columnspan=2, pady=10)
         
@@ -1477,7 +1496,7 @@ class ScenarioCompareDialog:
         title_label = ttk.Label(
             main_frame,
             text="方案对比",
-            font=('Arial', 14, 'bold')
+            font=(resolve_font_family(), 14, 'bold')
         )
         title_label.pack(pady=10)
         
@@ -1529,8 +1548,8 @@ class ScenarioCompareDialog:
             recommendation_label = ttk.Label(
                 main_frame,
                 text=f"💡 推荐方案：{self.comparison_data['recommendation']}",
-                font=('Arial', 10, 'bold'),
-                foreground='green'
+                font=(resolve_font_family(), 10, 'bold'),
+                foreground=COLORS['success']
             )
             recommendation_label.pack(pady=10)
         
@@ -1673,22 +1692,22 @@ class ScenarioManageDialog:
     def _make_check_image(filled: bool) -> tk.PhotoImage:
         """生成 22x22 复选框图片（V3.3：增大点选与视觉面积）"""
         size = 22
-        pixels = [["#FFFFFF"] * size for _ in range(size)]
+        pixels = [[COLORS['surface']] * size for _ in range(size)]
         for i in range(size):
-            pixels[0][i] = "#666666"
-            pixels[size - 1][i] = "#666666"
-            pixels[i][0] = "#666666"
-            pixels[i][size - 1] = "#666666"
+            pixels[0][i] = COLORS['connection']
+            pixels[size - 1][i] = COLORS['connection']
+            pixels[i][0] = COLORS['connection']
+            pixels[i][size - 1] = COLORS['connection']
         if filled:
             for y in range(2, size - 2):
                 for x in range(2, size - 2):
-                    pixels[y][x] = "#1F6FEB"
+                    pixels[y][x] = COLORS['chart_primary']
             # 白色对勾
             for i in range(6):
-                pixels[8 + i][5 + i] = "#FFFFFF"
+                pixels[8 + i][5 + i] = COLORS['surface']
             for i in range(8):
-                pixels[8 + i][12 - i] = "#FFFFFF"
-                pixels[7 + i][12 - i] = "#FFFFFF"
+                pixels[8 + i][12 - i] = COLORS['surface']
+                pixels[7 + i][12 - i] = COLORS['surface']
         data = tuple(" ".join(row) for row in pixels)
         image = tk.PhotoImage(width=size, height=size)
         image.put(data)
@@ -1886,7 +1905,7 @@ class GlossaryDialog:
         ttk.Label(
             main_frame,
             text="供应链关键术语速查",
-            font=('Arial', 13, 'bold'),
+            font=(resolve_font_family(), 13, 'bold'),
         ).pack(anchor=tk.W, pady=(0, 8))
 
         search_frame = ttk.Frame(main_frame)
@@ -2578,7 +2597,7 @@ class HistoryDialog:
         self.tree.column("upph", width=90, anchor=tk.E)
         self.tree.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
-        self.canvas = tk.Canvas(main, height=200, bg="#FFFFFF", highlightthickness=1)
+        self.canvas = tk.Canvas(main, height=200, bg=COLORS['surface'], highlightthickness=1)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._refresh()
         self._draw_chart()
@@ -2607,62 +2626,133 @@ class HistoryDialog:
             ))
 
     def _draw_chart(self) -> None:
+        """Draw labeled axes; use independent scales when KPI units differ."""
         self.canvas.delete("all")
         kpi = self._label_to_key.get(self.kpi_var.get(), "daily_output")
-        series = kpi_series(self.history, kpi)
         compare_kpi = self._label_to_key.get(self.compare_var.get(), "")
-        compare_series = (
-            kpi_series(self.history, compare_kpi) if compare_kpi else []
+        series = kpi_series(self.history, kpi)
+        compare_series = kpi_series(self.history, compare_kpi) if compare_kpi else []
+        reference = (
+            build_snapshot(self.line).get("kpis", {}).get(kpi)
+            if self.line is not None else None
         )
-        values = [v for _, v in series] + [v for _, v in compare_series]
-        reference = None
-        if self.line is not None:
-            reference = build_snapshot(self.line).get("kpis", {}).get(kpi, None)
-            if reference is not None:
-                values.append(reference)
         if not series:
             self.canvas.create_text(
                 260, 100, text="暂无记录，点击「记录当前产线」",
-                fill="#888888",
+                fill=COLORS['chart_muted'],
             )
             return
-        vmin, vmax = min(values), max(values)
-        span = (vmax - vmin) or 1.0
-        width, height = 740, 200
-        pad = 30
-        points = []
-        for i, (label, value) in enumerate(series):
-            x = pad + i * (width - 2 * pad) / max(len(series) - 1, 1)
-            y = height - pad - (value - vmin) / span * (height - 2 * pad)
-            points.append((x, y))
-        for (x1, y1), (x2, y2) in zip(points, points[1:]):
-            self.canvas.create_line(x1, y1, x2, y2, fill="#1F6FEB", width=2)
-        for x, y in points:
-            self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#1F6FEB")
-        if compare_series:
-            compare_points = []
-            for i, (_, value) in enumerate(compare_series):
-                x = pad + i * (width - 2 * pad) / max(len(compare_series) - 1, 1)
-                y = height - pad - (value - vmin) / span * (height - 2 * pad)
-                compare_points.append((x, y))
-            for (x1, y1), (x2, y2) in zip(compare_points, compare_points[1:]):
-                self.canvas.create_line(x1, y1, x2, y2, fill="#2DA44E", width=2)
+
+        percent_kpis = {'balance_rate', 'batch_pass_rate', 'yield_rate', 'machine_oee'}
+        if kpi in percent_kpis:
+            series = [(label, value * 100) for label, value in series]
+            if reference is not None:
+                reference *= 100
+        if compare_kpi in percent_kpis:
+            compare_series = [(label, value * 100) for label, value in compare_series]
+
+        unit = self.line.get_unit() if self.line else {
+            'assembly': '颗', 'liquid_filling': '千克', 'pouch_packaging': '袋',
+        }.get(self.history[-1].get('production_type'), '单位')
+        units = {
+            'bottleneck_capacity': f'{unit}/h', 'daily_output': unit,
+            'total_cost': '元', 'unit_cost': f'元/{unit}',
+            'balance_rate': '%', 'upph': f'{unit}/人·h',
+            'batch_cycle_min': '分钟', 'batch_pass_rate': '%',
+            'yield_rate': '%', 'machine_oee': '%',
+            'shippable_quantity': unit, 'rejected_batches': '批',
+        }
+        primary_unit = units.get(kpi, '')
+        comparison_unit = units.get(compare_kpi, '')
+        separate_scales = bool(compare_series and comparison_unit != primary_unit)
+        primary_values = [value for _, value in series]
         if reference is not None:
-            ref_y = height - pad - (reference - vmin) / span * (height - 2 * pad)
-            self.canvas.create_line(
-                pad, ref_y, width - pad, ref_y,
-                fill="#B3261E", dash=(4, 3),
-            )
+            primary_values.append(reference)
+        if compare_series and not separate_scales:
+            primary_values.extend(value for _, value in compare_series)
+        secondary_values = [value for _, value in compare_series] if separate_scales else primary_values
+
+        width = self.canvas.winfo_width()
+        if width <= 1:
+            width = 740
+        height = 200
+        left, right, top, bottom = 70, width - (75 if separate_scales else 25), 52, 166
+        primary_min, primary_max = min(primary_values), max(primary_values)
+        secondary_min, secondary_max = min(secondary_values), max(secondary_values)
+
+        def y_position(value, minimum, maximum):
+            span = (maximum - minimum) or 1.0
+            return bottom - (value - minimum) / span * (bottom - top)
+
+        def x_position(index):
+            return left + index * (right - left) / max(len(series) - 1, 1)
+
         self.canvas.create_text(
-            8, 8, anchor=tk.NW,
-            text=(
-                f"{self.KPI_LABELS.get(kpi, kpi)}"
-                f"{' vs ' + self.KPI_LABELS.get(compare_kpi, compare_kpi) if compare_kpi else ''}"
-                f"  最高 {vmax:.2f} / 最低 {vmin:.2f}"
-                f"（红虚线=当前值 {reference:.2f}）" if reference is not None else ""
+            8, 5, anchor=tk.NW,
+            text=format_history_title(
+                self.KPI_LABELS.get(kpi, kpi),
+                self.KPI_LABELS.get(compare_kpi, compare_kpi) if compare_series else '',
+                reference,
             ),
-            fill="#555555",
+            fill=COLORS['chart_text'],
         )
+        legend = [(kpi, COLORS['chart_primary'], primary_unit)]
+        if compare_series:
+            legend.append((compare_kpi, COLORS['chart_secondary'], comparison_unit))
+        for index, (key, color, axis_unit) in enumerate(legend):
+            legend_x = left + index * 230
+            self.canvas.create_line(legend_x, 34, legend_x + 18, 34, fill=color, width=2)
+            self.canvas.create_text(
+                legend_x + 23, 34, anchor=tk.W,
+                text=f"{self.KPI_LABELS.get(key, key)} ({axis_unit})",
+                fill=COLORS['chart_text'],
+            )
+
+        self.canvas.create_line(left, top, left, bottom, right, bottom,
+                                fill=COLORS['connection'])
+        if separate_scales:
+            self.canvas.create_line(right, top, right, bottom, fill=COLORS['connection'])
+        for fraction in (0, 0.5, 1):
+            tick_y = bottom - fraction * (bottom - top)
+            self.canvas.create_line(left, tick_y, right, tick_y,
+                                    fill=COLORS['border'], dash=(2, 3))
+            primary_tick = primary_min + fraction * (primary_max - primary_min)
+            self.canvas.create_text(
+                left - 5, tick_y, anchor=tk.E, text=f"{primary_tick:.2f}",
+                fill=COLORS['chart_text'],
+            )
+            if separate_scales:
+                secondary_tick = secondary_min + fraction * (secondary_max - secondary_min)
+                self.canvas.create_text(
+                    right + 5, tick_y, anchor=tk.W, text=f"{secondary_tick:.2f}",
+                    fill=COLORS['chart_secondary'],
+                )
+        for index in sorted({0, len(series) // 2, len(series) - 1}):
+            self.canvas.create_text(
+                x_position(index), bottom + 13, anchor=tk.N,
+                text=series[index][0][5:16], fill=COLORS['chart_text'],
+            )
+
+        def draw_series(values, color, minimum, maximum):
+            points = [
+                (x_position(index), y_position(value, minimum, maximum))
+                for index, (_, value) in enumerate(values)
+            ]
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                self.canvas.create_line(x1, y1, x2, y2, fill=color, width=2)
+            for x, y in points:
+                self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=color)
+
+        draw_series(series, COLORS['chart_primary'], primary_min, primary_max)
+        if compare_series:
+            draw_series(compare_series, COLORS['chart_secondary'],
+                        secondary_min, secondary_max)
+        if reference is not None:
+            ref_y = y_position(reference, primary_min, primary_max)
+            self.canvas.create_line(
+                left, ref_y, right, ref_y,
+                fill=COLORS['chart_reference'], dash=(4, 3),
+            )
 
     def _record(self) -> None:
         if self.line is None:
@@ -2731,6 +2821,7 @@ class SweepDialog:
         self.dialog.grab_set()
         self._create_widgets()
         self.dialog.bind('<Escape>', lambda e: self._close())
+        self.dialog.protocol("WM_DELETE_WINDOW", self._close)
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
         y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
@@ -2803,6 +2894,9 @@ class SweepDialog:
         ttk.Button(main, text="开始试算", command=self._run).grid(
             row=4, column=0, columnspan=2, sticky=tk.W, pady=8
         )
+        self.busy_bar = ttk.Progressbar(main, mode="indeterminate", length=150)
+        self.busy_bar.grid(row=4, column=2, sticky=tk.W)
+        self.busy_bar.grid_remove()
 
         columns = ("label", "output", "daily", "unit_cost", "upph")
         self.tree = ttk.Treeview(main, columns=columns, show="headings", height=10)
@@ -2839,7 +2933,7 @@ class SweepDialog:
         main.columnconfigure(1, weight=1)
         main.columnconfigure(2, weight=0)
         main.columnconfigure(3, weight=0)
-        self.canvas = tk.Canvas(main, height=180, bg="#FFFFFF", highlightthickness=1)
+        self.canvas = tk.Canvas(main, height=180, bg=COLORS['surface'], highlightthickness=1)
         self.canvas.grid(row=8, column=0, columnspan=3, sticky=tk.NSEW, pady=(4, 0))
         HelpSection(
             main,
@@ -2857,6 +2951,8 @@ class SweepDialog:
         ).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
 
     def _run(self) -> None:
+        if getattr(self, "_job_running", False):
+            return
         try:
             param = self._param_label_to_key.get(
                 self.param_var.get(), "worker_count"
@@ -2876,9 +2972,18 @@ class SweepDialog:
             if not values:
                 messagebox.showwarning("警告", "请填写取值列表")
                 return
-            self.dialog.config(cursor="watch")
-            self.dialog.update_idletasks()
-            base = SimulationEngine(copy.deepcopy(self.line)).run_sync(
+            line = copy.deepcopy(self.line)
+        except Exception as exc:
+            messagebox.showerror("试算失败", str(exc))
+            return
+
+        self._job_running = True
+        self._saved_states = set_dialog_busy(self.dialog, True)
+        self.busy_bar.grid()
+        self.busy_bar.start(10)
+
+        def work(progress):
+            base = SimulationEngine(copy.deepcopy(line)).run_sync(
                 duration_hours=duration
             )
             base_row = {
@@ -2889,10 +2994,20 @@ class SweepDialog:
                 "upph": base.kpis.get("upph", 0.0),
             }
             sweep_rows = run_sweep(
-                self.line, param, values,
+                line, param, values,
                 station_id=station_id, duration_hours=duration,
             )
-            self.rows = [base_row] + sweep_rows
+            return [base_row] + sweep_rows
+
+        def finish():
+            self.busy_bar.stop()
+            self.busy_bar.grid_remove()
+            set_dialog_busy(self.dialog, False, self._saved_states)
+            self._job_running = False
+
+        def success(rows):
+            finish()
+            self.rows = rows
             for item in self.tree.get_children():
                 self.tree.delete(item)
             for index, row in enumerate(self.rows):
@@ -2905,19 +3020,21 @@ class SweepDialog:
                 ))
                 if index == 0:
                     self.tree.item(item, tags=("baseline",))
-            self.tree.tag_configure("baseline", background="#EAF2FF")
+            self.tree.tag_configure("baseline", background=COLORS['chart_baseline'])
             self._draw_chart()
-        except Exception as e:
-            messagebox.showerror("试算失败", f"{e}\n\n详细日志：logs/app.log")
-        finally:
-            self.dialog.config(cursor="")
+
+        def error(exc):
+            finish()
+            messagebox.showerror("试算失败", f"{exc}\n\n详细日志：logs/app.log")
+
+        BackgroundJob(self.dialog, work, success, error).start()
 
     def _draw_chart(self) -> None:
         """批量试算折线图（V3.3）"""
         self.canvas.delete("all")
         if len(self.rows) < 2:
             self.canvas.create_text(
-                300, 80, text="运行试算后显示对比曲线", fill="#888888"
+                300, 80, text="运行试算后显示对比曲线", fill=COLORS['chart_muted']
             )
             return
         metric = self._metric_label_to_key.get(
@@ -2936,13 +3053,13 @@ class SweepDialog:
             y = height - pad - (value - vmin) / span * (height - 2 * pad)
             points.append((x, y))
         for (x1, y1), (x2, y2) in zip(points, points[1:]):
-            self.canvas.create_line(x1, y1, x2, y2, fill="#1F6FEB", width=2)
+            self.canvas.create_line(x1, y1, x2, y2, fill=COLORS['chart_primary'], width=2)
         for x, y in points:
-            self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#1F6FEB")
+            self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=COLORS['chart_primary'])
         baseline_y = height - pad - (base_value - vmin) / span * (height - 2 * pad)
         self.canvas.create_line(
             pad, baseline_y, width - pad, baseline_y,
-            fill="#B3261E", dash=(4, 3),
+            fill=COLORS['chart_reference'], dash=(4, 3),
         )
         self.canvas.create_text(
             8, 6, anchor=tk.NW,
@@ -2950,7 +3067,7 @@ class SweepDialog:
                 f"{self.METRIC_LABELS.get(metric, metric)} 曲线"
                 f"（红虚线=基线 {base_value:.2f}）"
             ),
-            fill="#555555",
+            fill=COLORS['chart_text'],
         )
 
     def _on_param_change(self) -> None:
@@ -3002,6 +3119,9 @@ class SweepDialog:
             messagebox.showerror("导出失败", f"{e}\n\n详细日志：logs/app.log")
 
     def _close(self) -> None:
+        if getattr(self, "_job_running", False):
+            messagebox.showinfo("正在试算", "请等待当前试算完成")
+            return
         self.dialog.destroy()
 
 
@@ -3032,6 +3152,7 @@ class OptimizeDialog:
         self.dialog.grab_set()
         self._create_widgets()
         self.dialog.bind('<Escape>', lambda e: self._close())
+        self.dialog.protocol("WM_DELETE_WINDOW", self._close)
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
         y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
@@ -3092,6 +3213,9 @@ class OptimizeDialog:
         ttk.Button(main, text="开始优化", command=self._run).grid(
             row=5, column=0, columnspan=2, sticky=tk.W, pady=10
         )
+        self.busy_bar = ttk.Progressbar(main, mode="indeterminate", length=150)
+        self.busy_bar.grid(row=5, column=2, sticky=tk.W)
+        self.busy_bar.grid_remove()
         self.progress_var = tk.StringVar(value="")
         ttk.Label(main, textvariable=self.progress_var).grid(
             row=6, column=0, columnspan=2, sticky=tk.W
@@ -3122,6 +3246,8 @@ class OptimizeDialog:
         ).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
     def _run(self) -> None:
+        if getattr(self, "_job_running", False):
+            return
         try:
             objective = self._objective_label_to_key.get(
                 self.objective_var.get(), "unit_cost"
@@ -3133,10 +3259,19 @@ class OptimizeDialog:
                 self.locked_listbox.get(index).split(" ")[0]
                 for index in self.locked_listbox.curselection()
             ]
-            self.dialog.config(cursor="watch")
-            self.dialog.update_idletasks()
+            line = copy.deepcopy(self.line)
+        except Exception as exc:
+            messagebox.showerror("优化失败", str(exc))
+            return
 
-            base = SimulationEngine(copy.deepcopy(self.line)).run_sync(
+        self._job_running = True
+        self._saved_states = set_dialog_busy(self.dialog, True)
+        self.busy_bar.grid()
+        self.busy_bar.start(10)
+        self.progress_var.set("正在计算基线...")
+
+        def work(progress):
+            base = SimulationEngine(copy.deepcopy(line)).run_sync(
                 duration_hours=duration
             )
             base_row = {
@@ -3153,14 +3288,10 @@ class OptimizeDialog:
             }
 
             def _progress(generation, total, best):
-                self.progress_var.set(
-                    f"正在优化：第 {generation}/{total} 代，"
-                    f"当前最优得分 {best:.1f}"
-                )
-                self.dialog.update_idletasks()
+                progress(f"正在优化：第 {generation}/{total} 代，当前最优得分 {best:.1f}")
 
             top = optimize(
-                self.line,
+                line,
                 objective=objective,
                 generations=generations,
                 population=population,
@@ -3168,6 +3299,17 @@ class OptimizeDialog:
                 locked_stations=locked,
                 progress_callback=_progress,
             )
+            return base_row, top
+
+        def finish():
+            self.busy_bar.stop()
+            self.busy_bar.grid_remove()
+            set_dialog_busy(self.dialog, False, self._saved_states)
+            self._job_running = False
+
+        def success(result):
+            finish()
+            base_row, top = result
             if not top:
                 messagebox.showwarning("提示", "未找到可行方案")
                 return
@@ -3201,10 +3343,15 @@ class OptimizeDialog:
                 actions=[("应用选中方案", lambda: self._apply_selected(dialog))],
             )
             self.progress_var.set("优化完成")
-        except Exception as e:
-            messagebox.showerror("优化失败", f"{e}\n\n详细日志：logs/app.log")
-        finally:
-            self.dialog.config(cursor="")
+
+        def error(exc):
+            finish()
+            messagebox.showerror("优化失败", f"{exc}\n\n详细日志：logs/app.log")
+
+        BackgroundJob(
+            self.dialog, work, success, error,
+            on_progress=lambda value: self.progress_var.set(value),
+        ).start()
 
     def _apply_selected(self, dialog) -> None:
         """把选中的 TOP 方案应用到当前产线（V3.3.1）"""
@@ -3239,6 +3386,9 @@ class OptimizeDialog:
         )
 
     def _close(self) -> None:
+        if getattr(self, "_job_running", False):
+            messagebox.showinfo("正在优化", "请等待当前优化完成")
+            return
         self.dialog.destroy()
 
 
@@ -3380,7 +3530,7 @@ class ResultTableDialog:
             item = self.tree.insert("", tk.END, values=values)
             if is_baseline:
                 self.tree.item(item, tags=("baseline",))
-        self.tree.tag_configure("baseline", background="#EAF2FF")
+        self.tree.tag_configure("baseline", background=COLORS['chart_baseline'])
 
     def get_selected_row(self):
         """返回当前选中行（V3.3.1）"""
@@ -3709,7 +3859,7 @@ class WizardDialog:
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 步骤提示
-        self.step_label = ttk.Label(self.main_frame, font=('Arial', 12, 'bold'))
+        self.step_label = ttk.Label(self.main_frame, font=(resolve_font_family(), 12, 'bold'))
         self.step_label.pack(anchor=tk.W, pady=(0, 10))
 
         # 步骤内容容器
@@ -3748,7 +3898,7 @@ class WizardDialog:
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(0, 6))
 
-        ttk.Label(self.page_template, text="选择生产类型：", font=('Arial', 10)).pack(
+        ttk.Label(self.page_template, text="选择生产类型：", font=(resolve_font_family(), 10)).pack(
             anchor=tk.W, pady=(0, 5)
         )
         self.production_type_var = tk.StringVar(value="assembly")
@@ -3772,7 +3922,7 @@ class WizardDialog:
             ToolTip(radio, type_hints[key])
         ttk.Separator(self.page_template, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
-        ttk.Label(self.page_template, text="选择产线模板：", font=('Arial', 10)).pack(anchor=tk.W, pady=5)
+        ttk.Label(self.page_template, text="选择产线模板：", font=(resolve_font_family(), 10)).pack(anchor=tk.W, pady=5)
         template_hints = {
             "simple": "3 工序快速体验，适合首次了解流程",
             "standard": "5 工序均衡示例，推荐新手（默认）",
@@ -3801,7 +3951,7 @@ class WizardDialog:
 
     def _build_page_source(self) -> None:
         """步骤 2：数据来源"""
-        ttk.Label(self.page_source, text="数据来源：", font=('Arial', 10)).pack(anchor=tk.W, pady=5)
+        ttk.Label(self.page_source, text="数据来源：", font=(resolve_font_family(), 10)).pack(anchor=tk.W, pady=5)
         ttk.Label(
             self.page_source,
             text="默认使用所选模板；也可以额外从 Excel 导入替换模板数据。",
@@ -3816,7 +3966,7 @@ class WizardDialog:
 
     def _build_page_shift(self) -> None:
         """步骤 3：班次设置"""
-        ttk.Label(self.page_shift, text="班次设置：", font=('Arial', 10)).pack(anchor=tk.W, pady=5)
+        ttk.Label(self.page_shift, text="班次设置：", font=(resolve_font_family(), 10)).pack(anchor=tk.W, pady=5)
         ttk.Label(
             self.page_shift,
             text="以下参数用于计算日产能与人力成本。",

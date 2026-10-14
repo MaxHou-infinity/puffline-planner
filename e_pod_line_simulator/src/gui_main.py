@@ -29,10 +29,13 @@ import os
 from tkinter import ttk, messagebox, filedialog, simpledialog
 from typing import Optional
 import threading
+import copy
+from queue import Empty, Full, Queue
 
 from src.models import ProductionLine, ProductionType, Station, SimulationState
 from src.simulation import SimulationEngine
 from src.gui_canvas import CanvasView
+from src.gui_jobs import BackgroundJob
 from src.gui_panels import (
     ConfigPanel,
     KPIDashboard,
@@ -108,6 +111,8 @@ class MainWindow:
         # 数据模型
         self.production_line: Optional[ProductionLine] = None  # 当前产线对象
         self.simulation_engine: Optional[SimulationEngine] = None  # 仿真引擎
+        self._state_queue = Queue(maxsize=1)
+        self._analysis_busy = False
         self.scenario_manager = ScenarioManager()  # 方案管理器（管理保存的方案）
 
         # 方案自动持久化：保存/删除方案后写入 configs/scenarios.json
@@ -123,11 +128,13 @@ class MainWindow:
         # 创建GUI组件
         self._create_menu_bar()  # 创建菜单栏
         self._create_main_layout()  # 创建主布局
+        self._update_empty_banner(False)
         self._create_status_bar()  # 创建状态栏
 
         # 未保存修改标记与快捷键
         self._dirty = False
         self._bind_shortcuts()
+        self.root.after(100, self._drain_simulation_states)
 
         # V3.3.5：首次运行引导（本地 marker，老用户不打扰）
         self._first_run_marker = get_first_run_marker_path()
@@ -149,6 +156,7 @@ class MainWindow:
         - 帮助：使用说明、术语说明、分析指南、关于
         """
         menubar = tk.Menu(self.root)
+        self.menubar = menubar
         self.root.config(menu=menubar)
         
         # 文件菜单（V3.3.1 精简：向导 + 保存方案）
@@ -337,7 +345,7 @@ class MainWindow:
             control_frame,
             text="保存方案",
             command=self._btn_save_scenario,
-            style="Primary.TButton",
+            style="Secondary.TButton",
         )
         self.btn_save_scenario.pack(side=tk.LEFT, padx=5)
 
@@ -363,6 +371,7 @@ class MainWindow:
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_bar = ttk.Label(status_frame, text="就绪", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.analysis_progress = ttk.Progressbar(status_frame, mode="indeterminate", length=120)
         self.status_meta = ttk.Label(status_frame, text="", relief=tk.SUNKEN, anchor=tk.E)
         self.status_meta.pack(side=tk.RIGHT, padx=(4, 0))
 
@@ -455,7 +464,9 @@ class MainWindow:
             return
         if has_stations:
             self.empty_banner.pack_forget()
+            self.btn_start.config(style="Accent.TButton")
         else:
+            self.btn_start.config(style="Secondary.TButton")
             self.empty_banner.pack(
                 fill=tk.X, padx=5, pady=(5, 0), before=self.canvas_view
             )
@@ -604,25 +615,6 @@ class MainWindow:
         if self.production_line is None or not self.production_line.stations:
             messagebox.showwarning("警告", "没有可导出的产线配置")
             return
-
-        # 有正在运行的仿真时导出当前进度；否则用当前配置快速仿真一次
-        result = None
-        try:
-            if self.simulation_engine and self.simulation_engine.is_running:
-                result = self.simulation_engine.build_result()
-            else:
-                self.status_bar.config(text="正在仿真以生成报告，请稍候...")
-                self.root.update_idletasks()
-                engine = SimulationEngine(self.production_line)
-                result = engine.run_sync(duration_hours=self.production_line.shift_hours)
-                self.status_bar.config(text="仿真完成，正在导出报告...")
-                self.root.update_idletasks()
-        except Exception as e:
-            messagebox.showerror("导出失败", f"仿真失败：{e}\n\n详细日志：logs/app.log")
-            self.logger.error("导出前仿真失败", exc_info=True)
-            self.status_bar.config(text="导出失败")
-            return
-
         file_path = filedialog.asksaveasfilename(
             title="导出报告",
             defaultextension=".xlsx",
@@ -634,34 +626,98 @@ class MainWindow:
         )
         if not file_path:
             return
-
-        if export_report(result, file_path):
-            show_toast(self.root, f"报告已导出：{file_path}")
-            self.status_bar.config(text=f"报告已导出：{file_path}")
-            self.logger.info("导出报告成功：%s", file_path)
-        else:
-            messagebox.showerror(
-                "失败",
-                "报告导出失败，请检查路径或依赖（reportlab/openpyxl）。\n\n详细日志：logs/app.log",
+        try:
+            live_result = (
+                self.simulation_engine.build_result()
+                if self.simulation_engine and self.simulation_engine.is_running
+                else None
             )
-            self.logger.error("导出报告失败：%s", file_path)
+            line = copy.deepcopy(self.production_line)
+        except Exception as exc:
+            messagebox.showerror("导出失败", str(exc))
+            return
+
+        def work(progress):
+            progress("正在生成报告...")
+            result = live_result or SimulationEngine(line).run_sync(
+                duration_hours=line.shift_hours
+            )
+            progress("正在写入报告...")
+            if not export_report(result, file_path):
+                raise OSError("报告导出失败，请检查路径或依赖")
+            return file_path
+
+        self._start_analysis_job(
+            work,
+            lambda path: show_toast(self.root, f"报告已导出：{path}"),
+            "正在生成报告...",
+        )
+
+    def _set_analysis_busy(self, busy: bool) -> None:
+        self._analysis_busy = busy
+        if busy:
+            self._busy_control_states = {
+                widget: str(widget.cget("state"))
+                for widget in (
+                    self.btn_start, self.btn_pause, self.btn_stop,
+                    self.btn_changeover, self.btn_save_scenario,
+                    self.btn_config_shift, self.speed_combo,
+                )
+            }
+            for widget in self._busy_control_states:
+                widget.config(state=tk.DISABLED)
+            self.config_panel.set_editable(False)
+            self.canvas_view.drag_enabled = False
+            for label in ("文件", "分析", "方案", "报告"):
+                self.menubar.entryconfig(label, state=tk.DISABLED)
+            self.analysis_progress.pack(side=tk.RIGHT, padx=6)
+            self.analysis_progress.start(10)
+        else:
+            self.analysis_progress.stop()
+            self.analysis_progress.pack_forget()
+            for widget, state in self._busy_control_states.items():
+                widget.config(state=state)
+            running = bool(self.simulation_engine and self.simulation_engine.is_running)
+            self.config_panel.set_editable(not running)
+            self.canvas_view.drag_enabled = not running
+            for label in ("文件", "分析", "方案", "报告"):
+                self.menubar.entryconfig(label, state=tk.NORMAL)
+
+    def _start_analysis_job(self, work, on_success, status: str) -> None:
+        if self._analysis_busy:
+            return
+        self._set_analysis_busy(True)
+        self.status_bar.config(text=status)
+
+        def success(value):
+            self._set_analysis_busy(False)
+            on_success(value)
+            self.status_bar.config(text="分析完成")
+
+        def error(exc):
+            self._set_analysis_busy(False)
+            self.logger.error("后台分析失败：%s", exc)
+            messagebox.showerror("分析失败", f"{exc}\n\n详细日志：logs/app.log")
+            self.status_bar.config(text="分析失败")
+
+        BackgroundJob(
+            self.root, work, success, error,
+            on_progress=lambda value: self.status_bar.config(text=str(value)),
+        ).start()
 
     def _menu_sensitivity(self) -> None:
         """分析菜单 - 敏感性试算（V3.1 P2）"""
         if self.production_line is None or not self.production_line.stations:
             messagebox.showwarning("警告", "没有可试算的产线配置")
             return
-        self.status_bar.config(text="正在运行敏感性试算，请稍候...")
-        self.root.update_idletasks()
-        try:
-            scenarios = run_sensitivity(
-                self.production_line,
-                duration_hours=self.production_line.shift_hours,
-            )
-        except Exception as e:
-            messagebox.showerror("试算失败", f"{e}\n\n详细日志：logs/app.log")
-            self.status_bar.config(text="敏感性试算失败")
-            return
+        line = copy.deepcopy(self.production_line)
+        self._start_analysis_job(
+            lambda progress: run_sensitivity(line, duration_hours=line.shift_hours),
+            self._show_sensitivity_results,
+            "正在运行敏感性试算...",
+        )
+
+    def _show_sensitivity_results(self, scenarios) -> None:
 
         rows = []
         for s in scenarios:
@@ -820,6 +876,8 @@ class MainWindow:
 
     def _on_space_shortcut(self, event) -> str:
         """空格：开始/暂停/恢复仿真（输入框内不触发）"""
+        if self._analysis_busy:
+            return 'break'
         focused = self.root.focus_get()
         if isinstance(focused, (tk.Entry, tk.Text)):
             return 'break'
@@ -855,14 +913,20 @@ class MainWindow:
             # 创建新的仿真引擎
             self.simulation_engine = SimulationEngine(self.production_line)
             # 设置状态更新回调
-            self.simulation_engine.set_callback(self._on_simulation_state_update)
+            self.simulation_engine.set_callback(
+                lambda state, engine=self.simulation_engine:
+                self._on_simulation_state_update(engine, state)
+            )
         elif not self.simulation_engine.is_running:
             # 仿真已停止，是新的仿真
             is_new_simulation = True
             # 创建新的仿真引擎
             self.simulation_engine = SimulationEngine(self.production_line)
             # 设置状态更新回调
-            self.simulation_engine.set_callback(self._on_simulation_state_update)
+            self.simulation_engine.set_callback(
+                lambda state, engine=self.simulation_engine:
+                self._on_simulation_state_update(engine, state)
+            )
         elif self.simulation_engine.is_paused:
             # 暂停后继续，恢复仿真
             self.simulation_engine.resume()
@@ -870,14 +934,17 @@ class MainWindow:
             self.status_bar.config(text="仿真已恢复")
             # 更新按钮状态
             self.btn_start.config(state=tk.DISABLED)
+            self.btn_start.config(text="开始仿真")
             self.btn_pause.config(state=tk.NORMAL)
             self.btn_stop.config(state=tk.NORMAL)
+            self.kpi_dashboard.set_run_state('running')
             return  # 不需要重新启动仿真
         
         # 如果是新的仿真，清空报警信息并重置时间戳
         if is_new_simulation:
             self.alert_panel.clear()
             self.kpi_dashboard.reset_timestamp()  # 重置时间戳
+            self.kpi_dashboard.update_actual_output(0)
             self.kpi_dashboard.set_run_state('running')
             # 运行中禁用编辑/速度/拖拽，避免无效操作
             self.canvas_view.drag_enabled = False
@@ -896,40 +963,60 @@ class MainWindow:
         
         # 更新按钮状态
         self.btn_start.config(state=tk.DISABLED)
+        self.btn_start.config(text="开始仿真")
         self.btn_pause.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.NORMAL)
         self.btn_changeover.config(state=tk.NORMAL)
         
         self.status_bar.config(text="仿真运行中...")
+        engine = self.simulation_engine
+        self.root.after(100, lambda: self._poll_simulation_completion(engine))
+
+    def _poll_simulation_completion(self, engine: SimulationEngine) -> None:
+        """Observe worker completion on the Tk thread and restore controls."""
+        if self.simulation_engine is not engine:
+            return
+        if engine.is_running:
+            self.root.after(100, lambda: self._poll_simulation_completion(engine))
+        elif self._analysis_busy:
+            self.root.after(100, lambda: self._poll_simulation_completion(engine))
+        else:
+            self._finalize_simulation(completed=True)
     
     def _btn_pause_simulation(self) -> None:
         """暂停仿真按钮"""
         if self.simulation_engine:
             self.simulation_engine.pause()
+            self.btn_start.config(state=tk.NORMAL, text="继续仿真")
+            self.btn_pause.config(state=tk.DISABLED)
             self.status_bar.config(text="仿真已暂停")
             self.kpi_dashboard.set_run_state('paused')
             # 暂停时，时间戳不再更新（保持当前值）
     
     def _btn_stop_simulation(self) -> None:
         """停止仿真按钮"""
+        self._finalize_simulation(completed=False)
+
+    def _finalize_simulation(self, completed: bool) -> None:
+        """Record the last snapshot and always stop the current engine."""
         if self.simulation_engine:
+            engine = self.simulation_engine
             try:
-                # V3.2：停止时自动记录 KPI 历史快照（尽力而为，不影响主流程）
-                append_snapshot(
-                    build_snapshot(
-                        self.production_line,
-                        self.simulation_engine.build_result(),
-                    )
-                )
-                self.simulation_engine.stop()
-            except:
-                pass  # 忽略停止时的错误
+                self.kpi_dashboard.update_actual_output(engine.total_output)
+                saved = append_snapshot(build_snapshot(self.production_line, engine.build_result()))
+                if not saved:
+                    raise OSError("KPI 历史快照未能保存")
+            except Exception as exc:
+                self.logger.exception("记录仿真快照失败")
+                messagebox.showwarning("记录失败", f"仿真已结束，但历史快照未保存：{exc}")
             finally:
+                engine.stop()
                 # 确保清理资源
                 self.simulation_engine = None
                 
                 # 更新按钮状态
                 self.btn_start.config(state=tk.NORMAL)
+                self.btn_start.config(text="开始仿真")
                 self.btn_pause.config(state=tk.DISABLED)
                 self.btn_stop.config(state=tk.DISABLED)
                 self.btn_changeover.config(state=tk.DISABLED)
@@ -944,7 +1031,7 @@ class MainWindow:
                     self.canvas_view.update_production_line(self.production_line)
                 
                 # 注意：停止时不清空报警信息，只在重新开始仿真时清空
-                self.status_bar.config(text="仿真已停止")
+                self.status_bar.config(text="仿真已完成" if completed else "仿真已停止")
                 self.kpi_dashboard.set_run_state('stopped')
                 # 恢复编辑能力
                 self.canvas_view.drag_enabled = True
@@ -1171,7 +1258,7 @@ class MainWindow:
 
     # ==================== 仿真回调 ====================
     
-    def _on_simulation_state_update(self, state: SimulationState) -> None:
+    def _on_simulation_state_update(self, engine: SimulationEngine, state: SimulationState) -> None:
         """
         仿真状态更新回调
         
@@ -1181,8 +1268,27 @@ class MainWindow:
         Args:
             state: 新的仿真状态
         """
-        # 使用after()方法确保在GUI线程中执行
-        self.root.after(0, lambda: self._update_simulation_state(state))
+        # Only the Tk thread may touch Tk; keep just the newest state.
+        try:
+            self._state_queue.put_nowait((engine, state))
+        except Full:
+            try:
+                self._state_queue.get_nowait()
+            except Empty:
+                pass
+            self._state_queue.put_nowait((engine, state))
+
+    def _drain_simulation_states(self) -> None:
+        """Consume the latest worker snapshot on the Tk event loop."""
+        latest = None
+        while True:
+            try:
+                latest = self._state_queue.get_nowait()
+            except Empty:
+                break
+        if latest and latest[0] is self.simulation_engine:
+            self._update_simulation_state(latest[1])
+        self.root.after(100, self._drain_simulation_states)
     
     def _update_simulation_state(self, state: SimulationState) -> None:
         """
@@ -1193,6 +1299,7 @@ class MainWindow:
         """
         # 更新画布显示
         self.canvas_view.update_simulation_state(state)
+        self.kpi_dashboard.update_actual_output(state.total_output)
         
         # 更新状态栏显示仿真时间
         if state:
