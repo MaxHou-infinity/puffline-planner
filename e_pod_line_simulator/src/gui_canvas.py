@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 from src.models import ProductionLine, Station, SimulationState
 from src.utils import get_status_color, CANVAS_WIDTH, CANVAS_HEIGHT, STATION_WIDTH, STATION_HEIGHT
-from src.theme import COLORS, STATUS_LABELS, status_soft, resolve_font_family
+from src.theme import COLORS, STATUS_LABELS, STATUS_SYMBOLS, status_soft, resolve_font_family
 
 
 def format_capacity_text(capacity: float, unit: str) -> str:
@@ -445,11 +445,10 @@ class CanvasView(tk.Canvas):
         )
         self.status_strips[station.id] = strip_id
         self.status_texts[station.id] = self.create_text(
-            x, rect_y1 + 9,
-            text=STATUS_LABELS.get(station.current_status, '空闲'),
+            rect_x1 + 15, rect_y1 + 9,
+            text=STATUS_SYMBOLS.get(station.current_status, '○'),
             font=(family, 8, 'bold'),
-            fill=(COLORS['text'] if station.current_status in ('idle', 'waiting')
-                  else COLORS['surface']),
+            fill=COLORS['text'],
             tags=(f"station_{station.id}", "station"),
         )
 
@@ -461,6 +460,7 @@ class CanvasView(tk.Canvas):
             x, y - 24,
             text=station.name,
             font=(family, 12, 'bold'),
+            fill=COLORS['text'],
             tags=(f"station_{station.id}", "station")
         )
         text_ids.append(text_id1)
@@ -470,6 +470,7 @@ class CanvasView(tk.Canvas):
             x, y - 4,
             text=f"👥 {station.worker_count}人",
             font=(family, 10),
+            fill=COLORS['text'],
             tags=(f"station_{station.id}", "station")
         )
         text_ids.append(text_id2)
@@ -481,6 +482,7 @@ class CanvasView(tk.Canvas):
             x, y + 15,
             text=format_capacity_text(capacity, unit),
             font=(family, 10),
+            fill=COLORS['text'],
             tags=(f"station_{station.id}", "station")
         )
         text_ids.append(text_id3)
@@ -492,6 +494,7 @@ class CanvasView(tk.Canvas):
                 x, y + 35,
                 text=f"📊 {utilization:.0%}",
                 font=(family, 10),
+                fill=COLORS['text'],
                 tags=(f"station_{station.id}", "station")
             )
             text_ids.append(text_id4)
@@ -701,9 +704,8 @@ class CanvasView(tk.Canvas):
             if station.id in self.status_texts:
                 self.itemconfig(
                     self.status_texts[station.id],
-                    text=STATUS_LABELS.get(status, status),
-                    fill=(COLORS['text'] if status in ('idle', 'waiting')
-                          else COLORS['surface']),
+                    text=STATUS_SYMBOLS.get(status, status),
+                    fill=COLORS['text'],
                 )
 
             # 更新产能文本（如果有变化）

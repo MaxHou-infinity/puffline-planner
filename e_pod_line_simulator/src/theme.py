@@ -55,6 +55,13 @@ STATUS_LABELS = {
     'waiting': '等待',
     'changeover': '换型',
 }
+STATUS_SYMBOLS = {
+    'idle': '○',
+    'running': '▶',
+    'blocked': '■',
+    'waiting': '…',
+    'changeover': '↻',
+}
 
 # 工序状态浅色填充（节点卡片底色，避免整块高饱和）
 STATUS_SOFT = {

@@ -23,6 +23,7 @@ def test_alert_icons_and_colors():
 
 def test_every_status_has_a_text_label():
     assert set(theme.STATUS_COLORS) == set(theme.STATUS_LABELS)
+    assert set(theme.STATUS_COLORS) == set(theme.STATUS_SYMBOLS)
 
 
 def test_utils_uses_theme_tokens():
