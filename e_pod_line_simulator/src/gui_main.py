@@ -870,8 +870,10 @@ class MainWindow:
             self.status_bar.config(text="仿真已恢复")
             # 更新按钮状态
             self.btn_start.config(state=tk.DISABLED)
+            self.btn_start.config(text="开始仿真")
             self.btn_pause.config(state=tk.NORMAL)
             self.btn_stop.config(state=tk.NORMAL)
+            self.kpi_dashboard.set_run_state('running')
             return  # 不需要重新启动仿真
         
         # 如果是新的仿真，清空报警信息并重置时间戳
@@ -896,40 +898,57 @@ class MainWindow:
         
         # 更新按钮状态
         self.btn_start.config(state=tk.DISABLED)
+        self.btn_start.config(text="开始仿真")
         self.btn_pause.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.NORMAL)
         self.btn_changeover.config(state=tk.NORMAL)
         
         self.status_bar.config(text="仿真运行中...")
+        engine = self.simulation_engine
+        self.root.after(100, lambda: self._poll_simulation_completion(engine))
+
+    def _poll_simulation_completion(self, engine: SimulationEngine) -> None:
+        """Observe worker completion on the Tk thread and restore controls."""
+        if self.simulation_engine is not engine:
+            return
+        if engine.is_running:
+            self.root.after(100, lambda: self._poll_simulation_completion(engine))
+        else:
+            self._finalize_simulation(completed=True)
     
     def _btn_pause_simulation(self) -> None:
         """暂停仿真按钮"""
         if self.simulation_engine:
             self.simulation_engine.pause()
+            self.btn_start.config(state=tk.NORMAL, text="继续仿真")
+            self.btn_pause.config(state=tk.DISABLED)
             self.status_bar.config(text="仿真已暂停")
             self.kpi_dashboard.set_run_state('paused')
             # 暂停时，时间戳不再更新（保持当前值）
     
     def _btn_stop_simulation(self) -> None:
         """停止仿真按钮"""
+        self._finalize_simulation(completed=False)
+
+    def _finalize_simulation(self, completed: bool) -> None:
+        """Record the last snapshot and always stop the current engine."""
         if self.simulation_engine:
+            engine = self.simulation_engine
             try:
-                # V3.2：停止时自动记录 KPI 历史快照（尽力而为，不影响主流程）
-                append_snapshot(
-                    build_snapshot(
-                        self.production_line,
-                        self.simulation_engine.build_result(),
-                    )
-                )
-                self.simulation_engine.stop()
-            except:
-                pass  # 忽略停止时的错误
+                saved = append_snapshot(build_snapshot(self.production_line, engine.build_result()))
+                if not saved:
+                    raise OSError("KPI 历史快照未能保存")
+            except Exception as exc:
+                self.logger.exception("记录仿真快照失败")
+                messagebox.showwarning("记录失败", f"仿真已结束，但历史快照未保存：{exc}")
             finally:
+                engine.stop()
                 # 确保清理资源
                 self.simulation_engine = None
                 
                 # 更新按钮状态
                 self.btn_start.config(state=tk.NORMAL)
+                self.btn_start.config(text="开始仿真")
                 self.btn_pause.config(state=tk.DISABLED)
                 self.btn_stop.config(state=tk.DISABLED)
                 self.btn_changeover.config(state=tk.DISABLED)
@@ -944,7 +963,7 @@ class MainWindow:
                     self.canvas_view.update_production_line(self.production_line)
                 
                 # 注意：停止时不清空报警信息，只在重新开始仿真时清空
-                self.status_bar.config(text="仿真已停止")
+                self.status_bar.config(text="仿真已完成" if completed else "仿真已停止")
                 self.kpi_dashboard.set_run_state('stopped')
                 # 恢复编辑能力
                 self.canvas_view.drag_enabled = True

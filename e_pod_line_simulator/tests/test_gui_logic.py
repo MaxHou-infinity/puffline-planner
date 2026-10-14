@@ -1,5 +1,9 @@
 """GUI 交互逻辑单元测试（不依赖显示环境）"""
 
+from types import SimpleNamespace
+
+from src.gui_main import MainWindow
+
 from src.gui_canvas import compute_reorder_order
 from src.gui_panels import build_template_line, station_edit_fields
 from src.models import ProductionType
@@ -10,6 +14,53 @@ def test_compute_reorder_order_move_to_middle():
     positions = {"s01": (0, 0), "s02": (100, 0), "s03": (200, 0)}
     new_order = compute_reorder_order(order, "s03", positions, 150, 0)
     assert new_order == ["s01", "s03", "s02"]
+
+
+def test_pause_exposes_mouse_resume_button():
+    calls = []
+    window = MainWindow.__new__(MainWindow)
+    window.simulation_engine = SimpleNamespace(pause=lambda: calls.append("pause"))
+    window.btn_start = SimpleNamespace(config=lambda **kwargs: calls.append(kwargs))
+    window.btn_pause = SimpleNamespace(config=lambda **kwargs: calls.append(kwargs))
+    window.status_bar = SimpleNamespace(config=lambda **kwargs: None)
+    window.kpi_dashboard = SimpleNamespace(set_run_state=lambda state: calls.append(state))
+    window._btn_pause_simulation()
+    assert "pause" in calls
+    assert {"state": "normal", "text": "继续仿真"} in calls
+    assert "paused" in calls
+
+
+def test_natural_completion_is_observed_on_tk_thread():
+    window = MainWindow.__new__(MainWindow)
+    engine = SimpleNamespace(is_running=False)
+    window.simulation_engine = engine
+    calls = []
+    window._finalize_simulation = lambda completed: calls.append(completed)
+    window._poll_simulation_completion(engine)
+    assert calls == [True]
+
+
+def test_stop_always_stops_engine_when_snapshot_fails(monkeypatch):
+    from src import gui_main
+
+    window = MainWindow.__new__(MainWindow)
+    calls = []
+    widget = SimpleNamespace(config=lambda **kwargs: None)
+    window.simulation_engine = SimpleNamespace(
+        build_result=lambda: object(), stop=lambda: calls.append("stopped")
+    )
+    window.production_line = SimpleNamespace(stations=[])
+    window.logger = SimpleNamespace(exception=lambda *args: None)
+    window.btn_start = window.btn_pause = window.btn_stop = widget
+    window.btn_changeover = window.speed_combo = window.status_bar = widget
+    window.config_panel = SimpleNamespace(set_editable=lambda value: None)
+    window.kpi_dashboard = SimpleNamespace(set_run_state=lambda state: None)
+    window.canvas_view = None
+    monkeypatch.setattr(gui_main, "build_snapshot", lambda *args: (_ for _ in ()).throw(ValueError("bad")))
+    monkeypatch.setattr(gui_main.messagebox, "showwarning", lambda *args: calls.append("warned"))
+    window._btn_stop_simulation()
+    assert calls == ["warned", "stopped"]
+    assert window.simulation_engine is None
 
 
 def test_compute_reorder_order_invalid():
