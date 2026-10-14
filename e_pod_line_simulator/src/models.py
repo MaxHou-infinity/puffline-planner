@@ -977,6 +977,10 @@ class Alert:
     message: str  # 报警消息，显示给用户的文本
     suggestion: str = ""  # 优化建议，告诉用户该怎么做
     timestamp_minutes: float = 0.0  # 报警时间戳（从仿真开始经过的分钟数）
+
+    def __post_init__(self) -> None:
+        """Keep severity consistent for filtering, colors, and exported records."""
+        self.severity = self.severity.strip().lower()
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典（用于JSON序列化）"""
