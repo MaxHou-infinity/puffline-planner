@@ -164,6 +164,10 @@ class CanvasView(tk.Canvas):
         self._drop_indicator: Optional[int] = None
         self.drag_enabled = True  # 仿真运行中由主窗口置 False
         self._hover_station_id: Optional[str] = None
+        self.selected_station_id: Optional[str] = None
+        self._resize_after_id = None
+        self._bottleneck_id: Optional[str] = None
+        self._bottleneck_capacity = 0.0
         
         # 布局参数
         self.station_spacing = 200  # 工序间距（像素）
@@ -234,11 +238,10 @@ class CanvasView(tk.Canvas):
         
         # 计算每行最大工序数（基于画布宽度）
         # 使用实际画布宽度，而不是固定值
-        canvas_width = self.winfo_reqwidth()  # 请求的宽度（实际可用宽度）
-        if canvas_width <= 1:  # 如果画布还没有初始化，使用当前画布宽度
-            canvas_width = self.winfo_width()
-        if canvas_width <= 1:  # 如果还是无效，使用默认宽度
-            canvas_width = CANVAS_WIDTH
+        canvas_width = self.winfo_width()
+        if canvas_width <= 1:
+            requested_width = self.winfo_reqwidth()
+            canvas_width = requested_width if requested_width > 1 else CANVAS_WIDTH
         
         available_width = canvas_width - 2 * self.start_x  # 可用宽度（减去左右边距）
         self.max_stations_per_row = max(1, int(available_width / self.station_spacing))
@@ -249,11 +252,10 @@ class CanvasView(tk.Canvas):
         
         # 计算起始Y坐标（居中显示所有行）
         # 使用实际画布高度
-        canvas_height = self.winfo_reqheight()  # 请求的高度（实际可用高度）
+        canvas_height = self.winfo_height()
         if canvas_height <= 1:
-            canvas_height = self.winfo_height()
-        if canvas_height <= 1:
-            canvas_height = CANVAS_HEIGHT
+            requested_height = self.winfo_reqheight()
+            canvas_height = requested_height if requested_height > 1 else CANVAS_HEIGHT
         
         total_height = (num_rows - 1) * self.station_row_height
         start_y = (canvas_height - total_height) // 2
@@ -291,6 +293,11 @@ class CanvasView(tk.Canvas):
             station_positions[station.id] = (x, y)
         self.station_positions = station_positions
         
+        # One bottleneck calculation per full redraw, rather than per station.
+        bottleneck = production_line.find_bottleneck()
+        self._bottleneck_id = bottleneck.id if bottleneck else None
+        self._bottleneck_capacity = bottleneck.get_capacity() if bottleneck else 0.0
+
         # 第二步：绘制所有工序节点
         for station in production_line.stations:
             pos = station_positions[station.id]
@@ -308,6 +315,8 @@ class CanvasView(tk.Canvas):
             self._draw_connection_curved(current_station.id, next_station.id, current_pos, next_pos)
 
         self._draw_type_badge()
+        if self.selected_station_id in self.station_cards:
+            self.highlight_station(self.selected_station_id)
         self._draw_batch_summary()
 
     def _draw_type_badge(self) -> None:
@@ -467,8 +476,7 @@ class CanvasView(tk.Canvas):
 
         # 负荷率（第四行）
         if self.production_line:
-            bottleneck_capacity = self.production_line.get_bottleneck_capacity()
-            utilization = station.get_utilization(bottleneck_capacity)
+            utilization = station.get_utilization(self._bottleneck_capacity)
             text_id4 = self.create_text(
                 x, y + 35,
                 text=f"📊 {utilization:.0%}",
@@ -480,8 +488,7 @@ class CanvasView(tk.Canvas):
         self.station_texts[station.id] = text_ids
 
         # 瓶颈徽标：右上角红色圆形
-        bottleneck = self.production_line.find_bottleneck() if self.production_line else None
-        if bottleneck and bottleneck.id == station.id:
+        if self._bottleneck_id == station.id:
             badge_id = self.create_oval(
                 rect_x2 - 18, rect_y1 + 18, rect_x2 - 4, rect_y1 + 32,
                 fill=COLORS['danger'],
@@ -712,6 +719,7 @@ class CanvasView(tk.Canvas):
         Args:
             station_id: 工序ID
         """
+        self.selected_station_id = station_id
         # 先取消所有高亮
         for station in self.production_line.stations if self.production_line else []:
             if station.id in self.station_cards:
@@ -850,13 +858,15 @@ class CanvasView(tk.Canvas):
             return
         # 重置上一悬停节点
         if self._hover_station_id and self._hover_station_id in self.station_cards:
+            selected = self._hover_station_id == self.selected_station_id
             self.itemconfig(
                 self.station_cards[self._hover_station_id],
-                outline=COLORS['border'],
-                width=1.5,
+                outline=COLORS['primary'] if selected else COLORS['border'],
+                width=3 if selected else 1.5,
             )
         self._hover_station_id = station_id
-        if station_id and station_id in self.station_cards and self.drag_enabled:
+        if (station_id and station_id in self.station_cards and self.drag_enabled
+                and station_id != self.selected_station_id):
             self.itemconfig(
                 self.station_cards[station_id],
                 outline=COLORS['focus'],
@@ -896,9 +906,9 @@ class CanvasView(tk.Canvas):
         
         # 如果已有产线数据，重新绘制
         if self.production_line:
-            # 延迟重绘，避免频繁触发（防抖）
-            # 使用after_idle确保在事件处理完成后重绘
-            self.after_idle(self._redraw_production_line)
+            if self._resize_after_id is not None:
+                self.after_cancel(self._resize_after_id)
+            self._resize_after_id = self.after(120, self._redraw_production_line)
     
     def _redraw_production_line(self) -> None:
         """
@@ -906,6 +916,7 @@ class CanvasView(tk.Canvas):
         
         这个方法与update_production_line类似，但专门用于窗口大小变化时的重绘
         """
+        self._resize_after_id = None
         if not self.production_line:
             return
         

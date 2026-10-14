@@ -7,7 +7,7 @@ from src.gui_main import MainWindow
 from src.gui_jobs import BackgroundJob
 
 from src.gui_canvas import compute_reorder_order
-from src.gui_panels import build_template_line, station_edit_fields
+from src.gui_panels import KPIDashboard, build_template_line, station_edit_fields
 from src.models import ProductionType
 
 
@@ -50,14 +50,17 @@ def test_stop_always_stops_engine_when_snapshot_fails(monkeypatch):
     calls = []
     widget = SimpleNamespace(config=lambda **kwargs: None)
     window.simulation_engine = SimpleNamespace(
-        build_result=lambda: object(), stop=lambda: calls.append("stopped")
+        total_output=7, build_result=lambda: object(),
+        stop=lambda: calls.append("stopped"),
     )
     window.production_line = SimpleNamespace(stations=[])
     window.logger = SimpleNamespace(exception=lambda *args: None)
     window.btn_start = window.btn_pause = window.btn_stop = widget
     window.btn_changeover = window.speed_combo = window.status_bar = widget
     window.config_panel = SimpleNamespace(set_editable=lambda value: None)
-    window.kpi_dashboard = SimpleNamespace(set_run_state=lambda state: None)
+    window.kpi_dashboard = SimpleNamespace(
+        set_run_state=lambda state: None, update_actual_output=lambda value: None
+    )
     window.canvas_view = SimpleNamespace(
         drag_enabled=False, update_production_line=lambda line: None
     )
@@ -89,6 +92,15 @@ def test_background_job_delivers_result_when_tk_polls():
     job.messages.put(("success", 7))
     job._poll()
     assert values == [7]
+
+
+def test_actual_output_is_distinct_from_estimates():
+    values = []
+    dashboard = KPIDashboard.__new__(KPIDashboard)
+    dashboard.current_unit = "袋"
+    dashboard.actual_output_label = SimpleNamespace(config=lambda **kwargs: values.append(kwargs))
+    dashboard.update_actual_output(1234)
+    assert values == [{"text": "本次仿真产出：1,234 袋"}]
 
 
 def test_compute_reorder_order_invalid():

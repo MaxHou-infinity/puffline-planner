@@ -941,6 +941,7 @@ class MainWindow:
         if is_new_simulation:
             self.alert_panel.clear()
             self.kpi_dashboard.reset_timestamp()  # 重置时间戳
+            self.kpi_dashboard.update_actual_output(0)
             self.kpi_dashboard.set_run_state('running')
             # 运行中禁用编辑/速度/拖拽，避免无效操作
             self.canvas_view.drag_enabled = False
@@ -998,6 +999,7 @@ class MainWindow:
         if self.simulation_engine:
             engine = self.simulation_engine
             try:
+                self.kpi_dashboard.update_actual_output(engine.total_output)
                 saved = append_snapshot(build_snapshot(self.production_line, engine.build_result()))
                 if not saved:
                     raise OSError("KPI 历史快照未能保存")
@@ -1294,6 +1296,7 @@ class MainWindow:
         """
         # 更新画布显示
         self.canvas_view.update_simulation_state(state)
+        self.kpi_dashboard.update_actual_output(state.total_output)
         
         # 更新状态栏显示仿真时间
         if state:

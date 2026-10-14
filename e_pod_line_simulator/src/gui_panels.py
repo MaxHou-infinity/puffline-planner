@@ -525,6 +525,15 @@ class KPIDashboard(ttk.LabelFrame):
             foreground=COLORS['text_secondary'],
         )
         self.v13_label.pack(fill=tk.X, pady=(4, 0))
+        self.actual_output_label = ttk.Label(
+            self, text="本次仿真产出：--", foreground=COLORS['text_secondary'],
+        )
+        self.actual_output_label.pack(fill=tk.X, pady=(2, 0))
+
+    def update_actual_output(self, output: int) -> None:
+        """Show simulated output separately from formula-based estimates."""
+        unit = getattr(self, "current_unit", "颗")
+        self.actual_output_label.config(text=f"本次仿真产出：{output:,} {unit}")
     
     def update_timestamp(self, minutes: float) -> None:
         """
@@ -617,13 +626,14 @@ class KPIDashboard(ttk.LabelFrame):
         if not hasattr(self, 'kpi_name_labels'):
             return
         label_map = {
-            'bottleneck_capacity': ('瓶颈产能', f'{unit}/h'),
+            'bottleneck_capacity': ('预计瓶颈产能', f'{unit}/h'),
             'daily_output': ('预计日产量', unit),
-            'total_cost': ('日成本', '元'),
-            'unit_cost': ('单位成本', f'元/{unit}'),
-            'balance_rate': ('产线平衡率', '%'),
-            'upph': ('UPPH', f'{unit}/人·h'),
+            'total_cost': ('预计日成本', '元'),
+            'unit_cost': ('预计单位成本', f'元/{unit}'),
+            'balance_rate': ('预计平衡率', '%'),
+            'upph': ('预计 UPPH', f'{unit}/人·h'),
         }
+        self.current_unit = unit
         for key, (name, unit_text) in label_map.items():
             if key in self.kpi_name_labels:
                 self.kpi_name_labels[key].config(text=name)
