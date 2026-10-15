@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.models import CollaborationType, ProductionLine, Station
+from src.models import CollaborationType, JobRole, ProductionLine, ProductionType, Station
 from src.hr_planning import (
     LaborCostConfig,
     LearningCurveConfig,
@@ -108,7 +108,8 @@ def test_build_hr_summary_shape():
     assert "headcount_by_role" in summary
     assert summary["costs"]["daily_labor_cost"] > 0
     assert len(summary["weekly_gap"]) == 12
-    assert summary["days_to_full"] >= 0
+    assert summary["days_to_full"] is None
+    assert not summary['feasible']
     assert "current_headcount" in summary
     assert "current_total" in summary
     assert "initial_gap" in summary
@@ -144,8 +145,168 @@ def test_empty_current_means_zero_staff():
     assert summary["current_total"] == 0
     assert summary["initial_gap"] == summary["total_headcount"]
     assert summary["one_time_hiring"] == summary["total_headcount"]
-    assert summary["days_to_full"] > 0
+    assert summary["days_to_full"] is None
     assert summary["weekly_gap"][0]["new_gap"] == summary["total_headcount"]
     assert summary["weekly_gap"][1]["new_gap"] == 0
     assert summary["excess_headcount"] == 0
     assert len(summary["station_derivation"]) == 8
+
+
+def test_two_shifts_require_two_crews_and_same_paid_hours():
+    line = make_assembly_line()
+    cost = LaborCostConfig(social_insurance_rate=0)
+    summaries = [build_hr_summary(
+        line, 840, ShiftPlan(shifts_per_day=shifts), cost,
+        LearningCurveConfig(), {'general': 2}, [],
+    ) for shifts in (1, 2)]
+    assert [row['headcount_per_shift'] for row in summaries] == [2, 1]
+    assert [row['total_headcount'] for row in summaries] == [2, 2]
+    assert [row['headcount_by_role']['general'] for row in summaries] == [2, 2]
+    assert [row['costs']['daily_labor_cost'] for row in summaries] == [320, 320]
+    assert all(row['costs']['per_unit_labor_cost'] == pytest.approx(320 / 840, abs=.0001)
+               for row in summaries)
+
+
+def test_support_roles_enter_total_cost_and_absence_coverage():
+    line = make_assembly_line()
+    line.labor_config = {'cleaner': 2}
+    summary = build_hr_summary(
+        line, 420, ShiftPlan(), LaborCostConfig(social_insurance_rate=0),
+        LearningCurveConfig(), {'general': 1, 'cleaner': 2}, [],
+    )
+    assert summary['total_headcount'] == 3
+    assert summary['headcount_per_shift'] == 3
+    assert summary['excess_headcount'] == 0
+    assert summary['costs']['daily_labor_cost'] == 480
+    covered = build_hr_summary(
+        line, 420, ShiftPlan(), LaborCostConfig(social_insurance_rate=0, absence_rate=.1),
+        LearningCurveConfig(), {'general': 1, 'cleaner': 2}, [],
+    )
+    assert covered['costs']['covered_headcount_by_role'] == {'general': 2, 'cleaner': 3}
+    assert covered['costs']['covered_headcount'] == 5
+    assert covered['costs']['daily_labor_cost'] == 800
+
+
+def test_absence_coverage_drives_hiring_gaps_and_feasibility():
+    line = make_assembly_line()
+    line.labor_config = {'cleaner': 2}
+    summary = build_hr_summary(
+        line, 420, ShiftPlan(), LaborCostConfig(social_insurance_rate=0, absence_rate=.1),
+        LearningCurveConfig(), {'general': 1, 'cleaner': 2}, [],
+    )
+    assert summary['total_headcount'] == 3
+    assert summary['headcount_by_role'] == {'general': 1, 'cleaner': 2}
+    assert summary['covered_headcount'] == summary['costs']['covered_headcount'] == 5
+    assert summary['covered_headcount_by_role'] == {'general': 2, 'cleaner': 3}
+    assert summary['initial_gap'] == summary['one_time_hiring'] == 2
+    assert summary['weekly_gap'][0]['gap'] == {'general': 1, 'cleaner': 1}
+    assert summary['excess_headcount'] == 0
+    assert summary['days_to_full'] is None
+    assert summary['capacity_feasible']
+    assert not summary['feasible']
+
+
+def test_absence_coverage_hiring_keeps_roles_and_shifts_independent():
+    line = make_assembly_line()
+    line.labor_config = {'cleaner': 2}
+    summary = build_hr_summary(
+        line, 840, ShiftPlan(shifts_per_day=2),
+        LaborCostConfig(social_insurance_rate=0, absence_rate=.1),
+        LearningCurveConfig(ramp_days=5, start_efficiency=.5),
+        {'general': 2, 'cleaner': 4}, [(1, 'general', 2), (2, 'cleaner', 2)],
+    )
+    assert summary['headcount_per_shift'] == 3
+    assert summary['total_headcount'] == 6
+    assert summary['covered_headcount_per_shift'] == 5
+    assert summary['covered_headcount'] == 10
+    assert summary['covered_headcount_by_role_per_shift'] == {'general': 2, 'cleaner': 3}
+    assert summary['covered_headcount_by_role'] == {'general': 4, 'cleaner': 6}
+    assert summary['initial_gap'] == 4
+    assert summary['one_time_hiring'] == 0
+    assert summary['weekly_gap'][0]['gap'] == {'general': 0, 'cleaner': 2}
+    assert summary['days_to_full'] == 12
+    assert summary['feasible']
+    assert summary['costs']['daily_labor_cost'] == 1600
+
+
+def test_extra_operator_cannot_replace_absence_cover_for_support_role():
+    line = make_assembly_line()
+    line.labor_config = {'cleaner': 2}
+    summary = build_hr_summary(
+        line, 420, ShiftPlan(), LaborCostConfig(social_insurance_rate=0, absence_rate=.1),
+        LearningCurveConfig(), {'general': 3, 'cleaner': 2}, [],
+    )
+    assert summary['current_total'] == summary['covered_headcount'] == 5
+    assert summary['initial_gap'] == summary['one_time_hiring'] == 1
+    assert summary['excess_headcount'] == 1
+    assert summary['days_to_full'] is None
+    assert not summary['feasible']
+
+
+def test_turnover_budget_replaces_absence_covered_staff():
+    line = make_assembly_line()
+    costs = calculate_labor_costs(
+        line, 3, ShiftPlan(),
+        LaborCostConfig(absence_rate=.1, monthly_turnover_rate=.25,
+                        recruitment_cost_per_head=100, training_cost_per_head=50),
+        headcount_by_role_per_shift={'general': 1, 'cleaner': 2},
+    )
+    assert costs['covered_headcount'] == 5
+    assert costs['monthly_recruit_training'] == 300
+
+
+def test_role_specific_ramp_does_not_use_extra_operators_as_qc():
+    line = make_assembly_line()
+    learning = LearningCurveConfig(ramp_days=10)
+    required = {'general': 2, 'qc_technician': 1}
+    current = {'general': 3}
+    assert ramp_days_to_full(line, 420, ShiftPlan(), required, current, learning) == 10
+    assert ramp_days_to_full(line, 420, ShiftPlan(), required, current, learning, []) is None
+    assert ramp_days_to_full(
+        line, 420, ShiftPlan(), required, current, learning, [(4, 'qc_technician', 1)]
+    ) == 31
+
+
+def test_hr_reports_machine_and_collaborative_capacity_constraints():
+    for machine, collaboration in [(1, CollaborationType.PARALLEL),
+                                   (None, CollaborationType.COLLABORATIVE)]:
+        line = make_assembly_line(worker_count=3, process_time=60)
+        station = line.stations[0]
+        station.collaboration_type = collaboration
+        station.machine_takt = machine
+        summary = build_hr_summary(
+            line, 100000, ShiftPlan(), LaborCostConfig(), LearningCurveConfig(),
+            {'general': 3}, [],
+        )
+        assert summary['headcount_by_station']['s01'] == 3
+        assert not summary['capacity_feasible']
+        assert not summary['feasible']
+        assert summary['days_to_full'] is None
+        assert any('加人不能' in reason for reason in summary['constraints'])
+
+
+def test_hr_rejects_unmodeled_liquid_and_invalid_shift_plans():
+    line = make_assembly_line()
+    line.production_type = ProductionType.LIQUID_FILLING
+    with pytest.raises(ValueError, match='烟油'):
+        required_headcount_by_station(line, 100, ShiftPlan())
+    line.production_type = ProductionType.ASSEMBLY
+    for shift in [ShiftPlan(shifts_per_day=0), ShiftPlan(shifts_per_day=4),
+                  ShiftPlan(break_minutes=480)]:
+        with pytest.raises(ValueError, match='班次'):
+            required_headcount_by_station(line, 420, shift)
+
+
+def test_role_shortage_is_not_hidden_by_total_excess_in_summary():
+    line = make_assembly_line(worker_count=2)
+    line.stations[0].job_role = JobRole.GENERAL
+    line.labor_config = {'qc_technician': 1}
+    summary = build_hr_summary(
+        line, 840, ShiftPlan(), LaborCostConfig(), LearningCurveConfig(ramp_days=5),
+        {'general': 3}, [(2, 'qc_technician', 1)],
+    )
+    assert summary['initial_gap'] == 1
+    assert summary['excess_headcount'] == 1
+    assert summary['one_time_hiring'] == 0
+    assert summary['days_to_full'] == 12
+    assert summary['feasible']

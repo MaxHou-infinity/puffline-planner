@@ -26,6 +26,10 @@ SimPy是一个离散事件仿真库，用于模拟系统中的事件流。
 """
 
 import random
+import copy
+import math
+import uuid
+from concurrent.futures import CancelledError
 import simpy
 from typing import List, Dict, Callable, Optional, Any
 from queue import Queue, Empty
@@ -70,7 +74,7 @@ class SimulationEngine:
         Args:
             production_line: 要仿真的产线对象
         """
-        self.line = production_line  # 产线对象
+        self.line = copy.deepcopy(production_line)  # 工作副本；运行不修改调用者配置
         self.env = None  # SimPy环境，在run()方法中创建
         
         # 仿真状态
@@ -105,7 +109,7 @@ class SimulationEngine:
         self.quality_results: List[Dict[str, Any]] = []
         self.cleaning_events: List[Dict[str, Any]] = []
         self._last_batch_recipe: Optional[str] = None
-        self.random_seed: Optional[int] = None
+        self.random_seed: Optional[int] = 0
         # P0 报警去重状态
         self._blockage_state: Dict[str, str] = {}   # station_id -> warning/critical
         self._blockage_since: Dict[str, float] = {}
@@ -125,6 +129,24 @@ class SimulationEngine:
         self.material_events: List[Dict[str, Any]] = []
         self._material_alerted: set = set()
         self._inventory: Dict[str, float] = {}
+        self.duration_seconds = 0.0
+        self.warmup_seconds = 0.0
+        self.run_id = ""
+        self.config_revision = ""
+        self.status = "idle"
+        self.error_message = ""
+        self._cancel_event = None
+        self._sim_thread = None
+        self._stop_event = threading.Event()
+        self._time_intervals = []
+        self._active_intervals = {}
+        self._station_attempts = {}
+        self._station_good = {}
+        self._station_scrap = {}
+        self._changeover_until = {}
+        self._batch_runtime = {}
+        self._tank_drained_quantity = 0.0
+        self._initial_tank_levels = {tank.id: tank.current_level_l for tank in self.line.tanks}
     
     def set_callback(self, callback: Callable[[SimulationState], None]) -> None:
         """
@@ -160,29 +182,48 @@ class SimulationEngine:
         if station is None:
             raise ValueError(f"工序不存在：{station_id}")
 
+        requested_time = self.env.now if self.env else 0.0
+        record = {
+            'requested_time': requested_time,
+            'start_time': None,
+            'station_id': station_id,
+            'station_name': station.name,
+            'minutes': int(minutes),
+            'status': 'queued',
+        }
         event = {
             'type': 'changeover',
             'station_id': station_id,
             'minutes': int(minutes),
+            'record': record,
         }
         self.event_queue.put(event)
 
-        timestamp_minutes = self.env.now / 60.0 if self.env else 0.0
-        self.changeover_events.append({
-            'time': self.env.now if self.env else 0.0,
-            'station_id': station_id,
-            'station_name': station.name,
-            'minutes': int(minutes),
-        })
+        self.changeover_events.append(record)
         self._emit_alert(Alert(
             alert_type='changeover',
             severity='info',
             station_id=station_id,
-            message=f"{station.name}开始切换，停机{int(minutes)}分钟",
-            suggestion="切换完成后自动恢复生产",
-            timestamp_minutes=timestamp_minutes,
+            message=f"{station.name}已申请切换，当前件完成后停机{int(minutes)}分钟",
+            suggestion="等待当前件完成，切换完成后自动恢复生产",
+            timestamp_minutes=requested_time / 60.0,
         ))
         return True
+
+    def _record_changeover(self, event, start_time):
+        """Record actual start/end separately from the user's request time."""
+        if start_time > self.env.now:
+            yield self.env.timeout(start_time - self.env.now)
+        record = event['record']
+        record.update(time=self.env.now, start_time=self.env.now, status='started')
+        self._emit_alert(Alert(
+            alert_type='changeover', severity='info', station_id=event['station_id'],
+            message=f"{record['station_name']}开始切换，停机{event['minutes']}分钟",
+            suggestion="切换完成后自动恢复生产",
+            timestamp_minutes=self.env.now / 60.0,
+        ))
+        yield self.env.timeout(event['minutes'] * 60)
+        record.update(end_time=self.env.now, status='completed')
 
     def _drain_events(self, station_id: str) -> List[Dict[str, Any]]:
         """
@@ -274,25 +315,23 @@ class SimulationEngine:
         return volume - remaining
 
     def _tank_drain_process(self) -> simpy.events.Process:
-        """
-        下游灌装线持续消耗储罐液位（V3.2）
+        """按配方灌装速率消耗放行罐，工序人数不能改变液体批次能力。
 
-        以首工序（灌装）理论产能作为消耗速率（千克/小时），每 60 仿真秒
-        从储罐取液，模拟成品罐 → 灌装线的连续出料。
+        这是批次/储罐近似模型，不是逐工序液体输送或设备排程模型。
         """
-        drain_rate_per_h = 0.0
-        if (
-            self.line.production_type == ProductionType.LIQUID_FILLING
-            and self.line.stations
-        ):
-            drain_rate_per_h = self.line.stations[0].get_capacity()
-        if drain_rate_per_h <= 0:
+        if self.line.production_type != ProductionType.LIQUID_FILLING or not self.line.recipes:
             return
         while True:
-            yield self.env.timeout(60)
-            self._withdraw_from_tanks(drain_rate_per_h / 60.0)
+            yield self.env.process(self._working_timeout(60))
+            recipe = next((recipe for recipe in self.line.recipes
+                           if recipe.name == self._last_batch_recipe), self.line.recipes[0])
+            self._tank_drained_quantity += self._withdraw_from_tanks(
+                recipe.filling_rate_l_per_h / 60.0
+            )
 
-    def _run_clean(self, reason: str, recipe_name: str) -> simpy.events.Process:
+    def _run_clean(
+        self, reason: str, recipe_name: str, minutes: Optional[float] = None,
+    ) -> simpy.events.Process:
         """
         执行一次清洗（配方切换 / 周期性 CIP）
 
@@ -301,13 +340,11 @@ class SimulationEngine:
         recipe = next(
             (r for r in self.line.recipes if r.name == recipe_name), None
         )
-        duration = (
-            recipe.clean_time_min
-            if recipe and recipe.clean_time_min > 0
-            else 30.0
+        duration = minutes if minutes is not None else (
+            recipe.clean_time_min if recipe and recipe.clean_time_min > 0 else 30.0
         )
         clean_start = self.env.now
-        yield self.env.timeout(duration * 60)
+        yield self.env.process(self._working_timeout(duration * 60, kind="cleaning"))
         self.cleaning_events.append({
             'time': clean_start,
             'recipe_from': self._last_batch_recipe,
@@ -316,7 +353,6 @@ class SimulationEngine:
             'reason': reason,
         })
         self._last_clean_hour = self.env.now / 3600.0
-        self._last_batch_recipe = recipe_name
 
     def _batch_sequence_process(self) -> simpy.events.Process:
         """
@@ -339,9 +375,7 @@ class SimulationEngine:
                 >= self.line.cip_interval_hours - 1e-9
             ):
                 need_periodic = True
-            if need_periodic:
-                yield self.env.process(self._run_clean('periodic', batch.recipe_name))
-            yield self.env.process(self._batch_process(batch))
+            yield self.env.process(self._batch_process(batch, periodic_clean=need_periodic))
 
     def _material_arrival_process(self) -> simpy.events.Process:
         """按到货计划补充原料库存（V3.2）"""
@@ -458,7 +492,7 @@ class SimulationEngine:
                 'quantity': quantity,
             })
 
-    def _batch_process(self, batch) -> simpy.events.Process:
+    def _batch_process(self, batch, periodic_clean=False) -> simpy.events.Process:
         """
         批次过程（V1.3 烟油灌装）
 
@@ -466,62 +500,58 @@ class SimulationEngine:
         """
         recipe = next((r for r in self.line.recipes if r.name == batch.recipe_name), None)
         if recipe is None:
-            batch.status = BatchStatus.RELEASED
-            self.batch_results.append({
-                'batch_id': batch.id,
-                'recipe_name': batch.recipe_name,
-                'status': 'released',
-                'error': '配方不存在',
-                'start_time': self.env.now,
-                'end_time': self.env.now,
-                'yield_l': 0.0,
-                'cycle_min': 0.0,
-                'pass_rate': 0.0,
-            })
-            return
+            raise ValueError("批次引用的配方不存在：" + batch.recipe_name)
 
-        # CIP/SIP 清洗切换：换配方时优先按换型矩阵，其次配方清洗时长
-        matrix_min = self.line.changeover_matrix.get(
-            self._last_batch_recipe, {}
-        ).get(recipe.name, 0.0)
-        if (
-            self._last_batch_recipe is not None
-            and self._last_batch_recipe != recipe.name
-            and (matrix_min > 0 or recipe.clean_time_min > 0)
-        ):
-            clean_start = self.env.now
-            clean_min = matrix_min if matrix_min > 0 else recipe.clean_time_min
-            yield self.env.timeout(clean_min * 60)
-            self.cleaning_events.append({
-                'time': clean_start,
-                'recipe_from': self._last_batch_recipe,
-                'recipe_to': recipe.name,
-                'clean_min': clean_min,
-                'reason': 'recipe_change',
-            })
-            self._last_clean_hour = self.env.now / 3600.0
+        # 同一批间清洗同时满足换配方与周期CIP，取时长最大值，不能覆盖矩阵。
+        previous = self._last_batch_recipe
+        recipe_change = previous is not None and previous != recipe.name
+        clean_min = 0.0
+        if recipe_change:
+            clean_min = self.line.changeover_matrix.get(previous, {}).get(
+                recipe.name, recipe.clean_time_min
+            )
+        if periodic_clean:
+            clean_min = max(clean_min, recipe.clean_time_min or 30.0)
+        if clean_min > 0:
+            reason = 'recipe_change' if recipe_change else 'periodic'
+            before = len(self.cleaning_events)
+            yield self.env.process(self._run_clean(reason, recipe.name, clean_min))
+            if periodic_clean and len(self.cleaning_events) > before:
+                self.cleaning_events[-1]['periodic'] = True
         self._last_batch_recipe = recipe.name
 
+        self._batch_runtime[batch.id] = {
+            'input_quantity': 0.0, 'produced_good_quantity': 0.0,
+            'pending_tank_quantity': 0.0, 'stored_quantity': 0.0,
+            'stage': 'waiting_materials',
+        }
+        runtime = self._batch_runtime[batch.id]
         # 投料：库存不足时等待到货（V3.2；未配置原料时保持原行为）
         if self.line.materials or self.line.inventory:
             yield self.env.process(self._consume_batch_materials(recipe, batch))
 
+        runtime['input_quantity'] = batch.quantity_l
+        runtime['stage'] = 'mixing'
         batch.status = BatchStatus.MIXING
         start_time = self.env.now
-        yield self.env.timeout(recipe.mixing_time_min * 60)
+        batch.start_time = start_time
+        yield self.env.process(self._working_timeout(recipe.mixing_time_min * 60))
 
         if recipe.aging_time_min > 0:
             batch.status = BatchStatus.AGING
+            runtime['stage'] = 'aging'
             yield self.env.timeout(recipe.aging_time_min * 60)
 
         batch.status = BatchStatus.FILLING
-        fill_seconds = recipe.batch_volume_l / recipe.filling_rate_l_per_h * 3600
-        yield self.env.timeout(fill_seconds)
+        runtime['stage'] = 'filling'
+        fill_seconds = batch.quantity_l / recipe.filling_rate_l_per_h * 3600
+        yield self.env.process(self._working_timeout(fill_seconds))
 
         batch.status = BatchStatus.QC
-        yield self.env.timeout(recipe.qc_time_min * 60)
+        runtime['stage'] = 'qc'
+        yield self.env.process(self._working_timeout(recipe.qc_time_min * 60))
 
-        yielded_l = recipe.batch_volume_l * recipe.yield_rate
+        yielded_l = batch.quantity_l * recipe.yield_rate
 
         # 质量门：QC 化验按抽检比例与缺陷率判定
         pass_rate = 1.0
@@ -534,8 +564,8 @@ class SimulationEngine:
                 if self._rng.random() < qc_station.defect_rate:
                     batch.status = BatchStatus.REWORK
                     batch.rework_count += 1
-                    yield self.env.timeout(qc_station.rework_minutes * 60)
-                    pass_rate = max(0.0, 1.0 - qc_station.defect_rate)
+                    yield self.env.process(self._working_timeout(qc_station.rework_minutes * 60))
+                    pass_rate = 0.0  # 批次整体隔离；不是按参数折算部分放行。
         self.quality_results.append({
             'time': self.env.now,
             'batch_id': batch.id,
@@ -544,12 +574,13 @@ class SimulationEngine:
         })
 
         end_time = self.env.now
-        batch.end_time = end_time
         batch.pass_rate = pass_rate
 
         # 放行/隔离（V3.2）：未通过质量门的批次隔离，不计入可发运产出
         if pass_rate < 1.0:
             batch.status = BatchStatus.REJECTED
+            batch.end_time = end_time
+            runtime['stage'] = 'rejected'
             self._emit_alert(Alert(
                 alert_type="batch_rejected",
                 severity="WARNING",
@@ -570,11 +601,12 @@ class SimulationEngine:
             })
             return
 
-        batch.status = BatchStatus.RELEASED
-
         # 罐容约束（V3.2）：按可用罐容分批注入，容量不足时等待并报警，
         # 禁止静默丢弃
         remaining = yielded_l
+        runtime['stage'] = 'waiting_tank'
+        runtime['produced_good_quantity'] = yielded_l
+        runtime['pending_tank_quantity'] = remaining
         while remaining > 1e-6:
             available = self._tank_total_available()
             if available <= 1e-6:
@@ -595,6 +627,8 @@ class SimulationEngine:
                 continue
             filled = self._distribute_to_tanks(min(remaining, available))
             remaining -= filled
+            runtime['pending_tank_quantity'] = remaining
+            runtime['stored_quantity'] += filled
             if remaining > 1e-6:
                 if batch.id not in self._tank_full_alerted:
                     self._tank_full_alerted.add(batch.id)
@@ -610,6 +644,12 @@ class SimulationEngine:
                     ))
                 yield self.env.timeout(60)
 
+        end_time = self.env.now
+        batch.end_time = end_time
+        batch.status = BatchStatus.RELEASED
+        runtime['stage'] = 'released'
+        if end_time >= self.warmup_seconds:
+            self.total_output += yielded_l
         self.batch_results.append({
             'batch_id': batch.id,
             'recipe_name': batch.recipe_name,
@@ -621,291 +661,323 @@ class SimulationEngine:
             'pass_rate': pass_rate,
         })
     
-    def run(self, duration_hours: float = 8.0, speed: int = 16) -> None:
-        """
-        运行仿真
-        
-        这是仿真的主入口，执行以下步骤：
-        1. 创建SimPy环境
-        2. 初始化资源（工人、缓冲区）
-        3. 启动各工序进程
-        4. 启动监控进程
-        5. 运行仿真直到指定时间
-        6. 收集结果
-        
-        Args:
-            duration_hours: 仿真时长（小时），默认8小时（一个班次）
-            speed: 仿真速度倍数，默认16倍（16x表示16倍速）
-                   speed=1是实时，speed=16表示16倍速
-        """
-        # 初始化状态
+    def _validate_run(self, duration_hours: float, warmup_minutes: float = 0.0) -> None:
+        """Protect the event loop even when callers bypass GUI/import validation."""
+        if not math.isfinite(duration_hours) or duration_hours <= 0:
+            raise ValueError("仿真时长必须为有限正数")
+        if (not math.isfinite(warmup_minutes)
+                or not 0 <= warmup_minutes * 60 < duration_hours * 3600):
+            raise ValueError("预热时间必须非负，且小于仿真总时长")
+        if not math.isfinite(self.line.shift_hours) or self.line.shift_hours <= 0:
+            raise ValueError("班次时长必须为有限正数")
+        if (not math.isfinite(self.line.break_minutes)
+                or not 0 <= self.line.break_minutes <= self.line.shift_hours * 60):
+            raise ValueError("休息时间必须在零与班次时长之间")
+        if not math.isfinite(self.line.worker_hourly_wage) or self.line.worker_hourly_wage < 0:
+            raise ValueError("时薪必须为有限非负数")
+        station_ids = set()
+        for station in self.line.stations:
+            if station.id in station_ids:
+                raise ValueError("工序ID不能重复")
+            station_ids.add(station.id)
+            for value in (station.worker_count, station.machine_count, station.buffer_capacity):
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value <= 0 or int(value) != value):
+                    raise ValueError("人数、机台数和缓冲容量必须为正整数")
+            if not math.isfinite(station.process_time) or station.process_time <= 0:
+                raise ValueError("工序时间必须为有限正数")
+            for value in (station.oee, station.efficiency):
+                if not math.isfinite(value) or not 0 <= value <= 1:
+                    raise ValueError("OEE和人员效率必须在0到1之间")
+            if station.machine_takt is not None and (
+                not math.isfinite(station.machine_takt) or station.machine_takt <= 0
+            ):
+                raise ValueError("机台节拍必须为有限正数")
+            for value in (station.changeover_time, station.clean_time_minutes,
+                          station.rework_minutes):
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError("停机、清洗和返工时间必须为有限非负数")
+            for value in (station.sampling_rate, station.defect_rate):
+                if not math.isfinite(value) or not 0 <= value <= 1:
+                    raise ValueError("质量比例必须为0到1之间的有限数值")
+            if any(not math.isfinite(qty) or qty < 0 for qty in station.bom.values()):
+                raise ValueError("BOM用量必须为有限非负数")
+        if self.line.production_type == ProductionType.LIQUID_FILLING:
+            recipes = {recipe.name: recipe for recipe in self.line.recipes}
+            for recipe in self.line.recipes:
+                if (not math.isfinite(recipe.batch_volume_l) or recipe.batch_volume_l <= 0
+                        or not math.isfinite(recipe.filling_rate_l_per_h)
+                        or recipe.filling_rate_l_per_h <= 0):
+                    raise ValueError("配方基准量和灌装速度必须为有限正数")
+                for value in (recipe.mixing_time_min, recipe.aging_time_min,
+                              recipe.qc_time_min, recipe.clean_time_min):
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError("批次阶段时长必须为有限非负数")
+                if not math.isfinite(recipe.yield_rate) or not 0 <= recipe.yield_rate <= 1:
+                    raise ValueError("配方收率必须在0到1之间")
+            for batch in self.line.batches:
+                if batch.recipe_name not in recipes:
+                    raise ValueError("批次引用的配方不存在：" + batch.recipe_name)
+                if not math.isfinite(batch.quantity_l) or batch.quantity_l <= 0:
+                    raise ValueError("批次数量必须为有限正数")
+            if self.line.batches and not self.line.tanks:
+                raise ValueError("烟油批次需要至少一个成品储罐")
+        from src.utils import validate_production_line
+        valid, error = validate_production_line(self.line, allow_empty=True)
+        if not valid:
+            raise ValueError(error)
+
+    def _prepare_run(self, duration_hours, warmup_minutes=0.0, cancel_event=None):
+        self._validate_run(duration_hours, warmup_minutes)
+        if self._sim_thread is not None and self._sim_thread.is_alive():
+            raise RuntimeError("已有仿真正在运行，请先停止")
+        self.duration_seconds = float(duration_hours) * 3600
+        self.warmup_seconds = float(warmup_minutes) * 60
+        for tank in self.line.tanks:
+            tank.current_level_l = self._initial_tank_levels.get(tank.id, tank.current_level_l)
+        self.config_revision = self.line.configuration_revision()
+        self._input_config = copy.deepcopy(self.line.to_dict())
+        self.run_id = uuid.uuid4().hex
+        self.status = "running"
+        self.error_message = ""
         self.is_running = True
         self.is_paused = False
-        self.speed = speed
-        
-        # 初始化统计数据
+        self._cancel_event = cancel_event
+        self._stop_event.clear()
         self.station_outputs = {station.id: 0 for station in self.line.stations}
         self.station_wips = {station.id: 0 for station in self.line.stations}
-        self.total_output = 0
+        self.total_output = 0.0
         self.batch_results = []
         self.quality_results = []
         self.cleaning_events = []
         self.material_events = []
+        self.wip_samples = []
+        # 保留首次启动前用户排入的换型事件；重跑不继承历史报警。
+        if self.env is not None:
+            self.alert_log = []
+            self.changeover_events = []
+            while True:
+                try:
+                    self.event_queue.get_nowait()
+                except Empty:
+                    break
         self._material_alerted = set()
-        self._inventory = (
-            dict(self.line.inventory)
-            if self.line.inventory
-            else {m.name: m.initial_stock for m in self.line.materials}
-        )
+        self._inventory = {m.name: m.initial_stock for m in self.line.materials}
+        self._inventory.update(self.line.inventory)
         self._rng = random.Random(self.random_seed)
+        self._last_batch_recipe = None
+        self._last_clean_hour = 0.0
         self._blockage_state = {}
         self._blockage_since = {}
         self._blockage_full_since = {}
         self._predict_alerted = set()
-        self.station_running_seconds = {}
-        self.station_starved_seconds = {}
-        self.station_blocked_seconds = {}
         self._starvation_alerted = set()
         self._blocked_alerted = set()
         self._tank_full_alerted = set()
-        self._last_clean_hour = 0.0
-
-        # 步骤1：创建SimPy环境
-        # Environment是SimPy的核心，管理仿真时钟和事件队列
+        self.station_running_seconds = {}
+        self.station_starved_seconds = {}
+        self.station_blocked_seconds = {}
+        self._time_intervals = []
+        self._active_intervals = {}
+        self._station_attempts = {}
+        self._station_good = {}
+        self._station_scrap = {}
+        self._changeover_until = {}
+        self._batch_runtime = {}
+        self._tank_drained_quantity = 0.0
+        self.station_resources = {}
+        self.buffers = {}
+        for tank in self.line.tanks:
+            tank.current_level_l = self._initial_tank_levels.get(tank.id, tank.current_level_l)
+        for batch in self.line.batches:
+            batch.status = BatchStatus.QUEUED
+            batch.start_time = batch.end_time = 0.0
+            batch.pass_rate = 1.0
+            batch.rework_count = 0
+        for station in self.line.stations:
+            station.current_status = "idle"
+            station.wip_count = station.total_output = 0
         self.env = simpy.Environment()
-        
-        # 步骤2：初始化资源
-        # Resource：代表工人，可以同时被多个进程使用（并联模式）
-        # Store：代表WIP缓冲区，用于存储物料
         self._init_resources()
-        
-        # 步骤3：启动各工序的工作进程
-        # 每个工序都有一个独立的工作进程，模拟物料加工
         if self.line.production_type == ProductionType.LIQUID_FILLING:
-            # 烟油：批次排产序列驱动（V3.2）
             self.env.process(self._batch_sequence_process())
             self.env.process(self._tank_drain_process())
         else:
             self._spawn_station_processes()
         self.env.process(self._material_arrival_process())
-        
-        # 步骤4：启动监控进程
-        # 监控瓶颈变化和WIP堆积
         self.env.process(self._monitor_bottleneck())
         self.env.process(self._monitor_wip())
         self.env.process(self._monitor_starvation())
         self.env.process(self._update_state_periodically())
-        
-        # 步骤5：运行仿真
-        # 在单独的线程中运行，避免阻塞GUI主线程
-        duration_seconds = duration_hours * 3600  # 转换为秒
-        
-        # 保存仿真参数
-        self.duration_seconds = duration_seconds
+
+    def run(self, duration_hours: float = 8.0, speed: int = 16) -> None:
+        """以指定演示速度启动后台仿真；速度不影响业务日历。"""
+        if not math.isfinite(speed) or speed <= 0:
+            raise ValueError("仿真速度必须为有限正数")
+        self._prepare_run(duration_hours)
         self.speed = speed
-        
-        # 在新线程中运行SimPy
-        sim_thread = threading.Thread(
+        self._sim_thread = threading.Thread(
             target=self._run_simulation_thread,
-            args=(duration_seconds, speed),
-            daemon=True  # 守护线程，主程序退出时自动结束
+            args=(self.duration_seconds, speed), daemon=True,
         )
-        sim_thread.start()
-    
+        self._sim_thread.start()
+
     def _init_resources(self) -> None:
-        """
-        初始化SimPy资源（工人和缓冲区）
-        
-        为每个工序创建：
-        - Resource：代表工人资源（并联模式时容量=工人数，协同模式时容量=1）
-        - Store：代表WIP缓冲区（用于工序间物料传递）
-        """
         for station in self.line.stations:
-            # 创建工人资源
-            if station.collaboration_type == CollaborationType.PARALLEL:
-                # 并联模式：资源容量 = 工人数，可以同时处理多个物料
-                capacity = station.worker_count
-            else:
-                # 协同模式：资源容量 = 1，只能处理一个物料
-                capacity = 1
-            
-            self.station_resources[station.id] = simpy.Resource(self.env, capacity=capacity)
-            
-            # 创建WIP缓冲区
-            # Store用于存储物料，容量为buffer_capacity
-            self.buffers[station.id] = simpy.Store(self.env, capacity=station.buffer_capacity)
+            self.station_resources[station.id] = simpy.Resource(
+                self.env, capacity=station.processing_units()
+            )
+            self.buffers[station.id] = simpy.Store(self.env, capacity=int(station.buffer_capacity))
 
     def _spawn_station_processes(self) -> None:
-        """
-        按协作模式启动工序进程
-
-        - 并联：每名工人一个进程，产能 = 节拍 × 工位数（匹配 get_capacity）
-        - 协同：单进程，多人共享（资源容量 1，自动排队）
-        """
         for station in self.line.stations:
-            if station.collaboration_type == CollaborationType.PARALLEL:
-                count = max(1, station.worker_count)
-            else:
-                count = 1
-            for _ in range(count):
+            if station.oee == 0 or station.efficiency == 0:
+                station.current_status = "planned_stop"
+                continue
+            for _ in range(station.processing_units()):
                 self.env.process(self._station_process(station))
-    
-    def _station_process(self, station: Station) -> simpy.events.Process:
-        """
-        工序工作进程（SimPy生成器函数）
-        
-        这是每个工序的核心逻辑，模拟物料加工过程：
-        1. 从上游缓冲区获取物料（如果有上游）
-        2. 请求工人资源（等待可用工人）
-        3. 占用工人资源，开始加工
-        4. 等待加工时间（process_time）
-        5. 释放工人资源
-        6. 将物料放入下游缓冲区（如果有下游）
-        7. 更新统计数据
-        
-        这是SimPy的生成器函数，使用yield来暂停和恢复执行
-        
-        Args:
-            station: 工序对象
-            
-        Yields:
-            simpy.events: SimPy事件（timeout、request等）
-        """
-        # 获取资源引用
-        resource = self.station_resources[station.id]
-        
-        # 获取缓冲区引用
-        # 本工序的缓冲区用于接收上游物料
-        input_buffer = self.buffers[station.id]
-        
-        # 找到下游工序的缓冲区（用于输出物料）
-        downstream_buffer = None
-        station_index = self.line.stations.index(station)
-        if station_index < len(self.line.stations) - 1:
-            # 如果不是最后一个工序，有下游
-            downstream_station = self.line.stations[station_index + 1]
-            downstream_buffer = self.buffers[downstream_station.id]
-        
-        # 无限循环，模拟持续的物料加工
+
+    def _interval_start(self, station_id, kind):
+        token = object()
+        self._active_intervals[token] = (station_id, kind, self.env.now)
+        return token
+
+    def _interval_end(self, token):
+        station_id, kind, start = self._active_intervals.pop(token)
+        self._time_intervals.append((station_id, kind, start, self.env.now))
+        counters = {
+            "running": self.station_running_seconds,
+            "waiting": self.station_starved_seconds,
+            "blocked": self.station_blocked_seconds,
+        }
+        if kind in counters:
+            elapsed = max(0.0, self.env.now - max(start, self.warmup_seconds))
+            counters[kind][station_id] = counters[kind].get(station_id, 0.0) + elapsed
+
+    def _station_wait_seconds(self, station_id, kind):
+        """Measured resource seconds, including waits that have not ended yet."""
+        counters = {
+            'waiting': self.station_starved_seconds,
+            'blocked': self.station_blocked_seconds,
+        }
+        closed = counters[kind].get(station_id, 0.0)
+        active = sum(
+            max(0.0, self.env.now - max(begun, self.warmup_seconds))
+            for active_station, active_kind, begun in self._active_intervals.values()
+            if active_station == station_id and active_kind == kind
+        )
+        return closed + active
+
+    def _wait_for_production(self, station=None):
+        """生产在班前，休息/计划换型与清洗在班尾；跨班恢复同一物料。"""
         while True:
-            # 检查是否有针对本工序的切换事件
-            changeover_events = self._drain_events(station.id)
-            if changeover_events:
-                changeover = changeover_events[0]
-                # 同工序的其余切换事件放回队列，按顺序继续执行
-                for extra in changeover_events[1:]:
-                    self.event_queue.put(extra)
-                station.current_status = "changeover"
-                yield self.env.timeout(float(changeover['minutes']) * 60)
+            now = self.env.now
+            shift_seconds = self.line.shift_hours * 3600
+            productive = self.line.effective_hours(station) * 3600
+            phase = now % shift_seconds
+            station_id = station.id if station is not None else ""
+            if station is not None:
+                for event in self._drain_events(station.id):
+                    start_time = max(
+                        now, self._changeover_until.get(station.id, 0.0)
+                    )
+                    self._changeover_until[station.id] = start_time + event['minutes'] * 60
+                    self.env.process(self._record_changeover(event, start_time))
+            manual_until = self._changeover_until.get(station_id, 0.0)
+            if manual_until > now:
+                if station is not None:
+                    station.current_status = "changeover"
+                yield self.env.timeout(manual_until - now)
+                continue
+            if phase < productive - 1e-9:
+                return productive - phase
+            if station is not None:
+                station.current_status = "planned_stop"
+            yield self.env.timeout(shift_seconds - phase)
+
+    def _working_timeout(self, seconds, station=None, kind="running"):
+        """消耗指定生产时长；保留跨计划停机的剩余加工时间。"""
+        remaining = seconds
+        while remaining > 1e-9:
+            available = yield self.env.process(self._wait_for_production(station))
+            interval = min(remaining, available)
+            token = self._interval_start(station.id if station is not None else "", kind)
+            if station is not None:
+                station.current_status = "running" if kind == "running" else "waiting"
+            yield self.env.timeout(interval)
+            self._interval_end(token)
+            remaining -= interval
+
+    def _station_process(self, station: Station) -> simpy.events.Process:
+        index = self.line.stations.index(station)
+        incoming = self.buffers[station.id]
+        downstream = (self.buffers[self.line.stations[index + 1].id]
+                      if index + 1 < len(self.line.stations) else None)
+        while True:
+            yield self.env.process(self._wait_for_production(station))
+            if index > 0:
+                station.current_status = "waiting"
+                token = self._interval_start(station.id, "waiting")
+                item = yield incoming.get()
+                self._interval_end(token)
+                self.station_wips[station.id] = len(incoming.items)
+            else:
+                item = object()
+            # 同一物料在本站至多返工一次；返工不重复领BOM，也不创建第二个物料。
+            if station.bom and (self.line.materials or self.line.inventory):
+                yield self.env.process(self._consume_station_materials(station))
+            takt = (station.machine_takt if station.machine_takt is not None
+                    else station.process_time)
+            yield self.env.process(self._working_timeout(
+                takt / (station.oee * station.efficiency), station
+            ))
+            measured = self.env.now >= self.warmup_seconds
+            if measured:
+                self._station_attempts[station.id] = self._station_attempts.get(station.id, 0) + 1
+            good = True
+            for attempt in range(2):
+                defective = (
+                    station.sampling_rate > 0 and station.defect_rate > 0
+                    and self._rng.random() < station.sampling_rate
+                    and self._rng.random() < station.defect_rate
+                )
+                if not defective:
+                    break
+                rework = attempt == 0 and station.rework_minutes > 0
+                self.quality_results.append({
+                    'time': self.env.now, 'station_id': station.id,
+                    'station_name': station.name, 'defect': True,
+                    'rework_min': station.rework_minutes if rework else 0.0,
+                    'outcome': 'rework' if rework else 'scrapped', 'attempt': attempt,
+                })
+                if not rework:
+                    good = False
+                    if self.env.now >= self.warmup_seconds:
+                        self._station_scrap[station.id] = (
+                            self._station_scrap.get(station.id, 0) + 1
+                        )
+                    break
+                yield self.env.process(self._working_timeout(
+                    station.rework_minutes * 60, station, kind="rework"
+                ))
+            if not good:
                 station.current_status = "idle"
                 continue
-
-            try:
-                # 步骤1：从上游缓冲区获取物料（如果不是第一个工序）
-                if station_index > 0:
-                    # 有上游，需要等待物料
-                    # get()会阻塞直到有物料可用
-                    wait_start = self.env.now
-                    yield input_buffer.get()
-                    self.station_starved_seconds[station.id] = (
-                        self.station_starved_seconds.get(station.id, 0.0)
-                        + (self.env.now - wait_start)
-                    )
-                    # 更新WIP统计（取走一个物料，WIP-1）
-                    self.station_wips[station.id] = len(input_buffer.items)
-                else:
-                    # 第一个工序，没有上游，直接开始加工
-                    # 模拟物料源持续供应
-                    pass
-
-                # V3.2：BOM 组件投料（缺料时阻塞）
-                if station.bom and (self.line.materials or self.line.inventory):
-                    yield self.env.process(self._consume_station_materials(station))
-                
-                # 步骤2：请求工人资源
-                # request()会阻塞直到有可用工人
-                # 在并联模式下，如果有多个工人，可以同时处理多个物料
-                with resource.request() as req:
-                    yield req  # 等待获得资源
-                    
-                    # 步骤3：开始加工，占用工人资源
-                    station.current_status = "running"
-                    
-                    # 步骤4：等待加工时间
-                    # timeout是SimPy的核心，用于模拟时间流逝
-                    # process_time是实际加工时间，但需要考虑效率
-                    # 实际时间 = 理论时间 / (OEE × efficiency)
-                    # 机台节拍模式（尼古丁袋）使用 machine_takt，否则使用单颗耗时
-                    effective_time = station.machine_takt if station.machine_takt else station.process_time
-                    actual_process_time = effective_time / (station.oee * station.efficiency)
-                    run_start = self.env.now
-                    yield self.env.timeout(actual_process_time)
-                    self.station_running_seconds[station.id] = (
-                        self.station_running_seconds.get(station.id, 0.0)
-                        + (self.env.now - run_start)
-                    )
-                    
-                    # 步骤5：加工完成，释放资源（自动释放，with语句结束）
-                    station.current_status = "idle"
-                    
-                    # 步骤6：将物料放入下游缓冲区
-                    if downstream_buffer is not None:
-                        # 如果不是最后一个工序，放入下游缓冲区
-                        # put()会阻塞如果缓冲区满了（模拟堵塞）
-                        block_start = self.env.now
-                        try:
-                            yield downstream_buffer.put("material")  # "material"是物料标识
-                            self.station_blocked_seconds[station.id] = (
-                                self.station_blocked_seconds.get(station.id, 0.0)
-                                + (self.env.now - block_start)
-                            )
-                            # 更新下游WIP统计
-                            if station_index < len(self.line.stations) - 1:
-                                downstream_station = self.line.stations[station_index + 1]
-                                self.station_wips[downstream_station.id] = len(downstream_buffer.items)
-                        except simpy.Interrupt:
-                            self.station_blocked_seconds[station.id] = (
-                                self.station_blocked_seconds.get(station.id, 0.0)
-                                + (self.env.now - block_start)
-                            )
-                            # 如果缓冲区满了，工序进入堵塞状态
-                            station.current_status = "blocked"
-                            continue
-                    else:
-                        # 最后一个工序，物料完成，直接计入产出
-                        pass
-
-                    # 步骤6.5：质量门（在线检测）
-                    if station.sampling_rate > 0 and station.defect_rate > 0:
-                        if self._rng.random() < station.sampling_rate:
-                            if self._rng.random() < station.defect_rate:
-                                station.current_status = "waiting"
-                                yield self.env.timeout(station.rework_minutes * 60)
-                                self.quality_results.append({
-                                    'time': self.env.now,
-                                    'station_id': station.id,
-                                    'station_name': station.name,
-                                    'defect': True,
-                                    'rework_min': station.rework_minutes,
-                                })
-                                station.current_status = "idle"
-                                # V3.2 返工回路：缺陷件非阻塞回写缓冲区，
-                                # 避免满缓冲死锁（首工序无上游则报废）
-                                if (
-                                    station_index > 0
-                                    and len(input_buffer.items) < input_buffer.capacity
-                                ):
-                                    input_buffer.items.append("material")
-                                continue
-                    
-                    # 步骤7：更新统计数据
-                    self.station_outputs[station.id] += 1
+            if self.env.now >= self.warmup_seconds:
+                self._station_good[station.id] = self._station_good.get(station.id, 0) + 1
+            # 质量门通过后才向下游交付；Store.put保留背压与唤醒语义。
+            if downstream is not None:
+                station.current_status = "blocked"
+                token = self._interval_start(station.id, "blocked")
+                yield downstream.put(item)
+                self._interval_end(token)
+                self.station_wips[self.line.stations[index + 1].id] = len(downstream.items)
+            if self.env.now >= self.warmup_seconds:
+                self.station_outputs[station.id] += 1
+                if downstream is None:
                     self.total_output += 1
-                    
-            except simpy.Interrupt:
-                # 处理中断（如暂停、停止）
-                continue
-    
+            station.current_status = "idle"
+
     def _monitor_bottleneck(self) -> simpy.events.Process:
         """
         监控瓶颈进程
@@ -1095,8 +1167,8 @@ class SimulationEngine:
             for idx, station in enumerate(self.line.stations):
                 if idx == 0:
                     continue
-                starved = self.station_starved_seconds.get(station.id, 0.0)
-                per_worker = starved / max(1, station.worker_count)
+                starved = self._station_wait_seconds(station.id, 'waiting')
+                per_worker = starved / station.processing_units()
                 if per_worker >= 300 and station.id not in self._starvation_alerted:
                     self._starvation_alerted.add(station.id)
                     bottleneck = self.line.find_bottleneck()
@@ -1123,8 +1195,8 @@ class SimulationEngine:
             for idx, station in enumerate(self.line.stations):
                 if idx >= len(self.line.stations) - 1:
                     continue
-                blocked = self.station_blocked_seconds.get(station.id, 0.0)
-                per_worker = blocked / max(1, station.worker_count)
+                blocked = self._station_wait_seconds(station.id, 'blocked')
+                per_worker = blocked / station.processing_units()
                 if per_worker >= 300 and station.id not in self._blocked_alerted:
                     self._blocked_alerted.add(station.id)
                     bottleneck = self.line.find_bottleneck()
@@ -1221,107 +1293,24 @@ class SimulationEngine:
         return state
     
     def _run_simulation_thread(self, duration_seconds: float, speed: int = 1) -> None:
-        """
-        在单独线程中运行仿真
-        
-        这是为了避免阻塞GUI主线程
-        根据仿真速度控制时间推进：
-        - 1倍速：1秒真实时间 = 1秒仿真时间
-        - 2倍速：1秒真实时间 = 2秒仿真时间
-        - 8倍速：1秒真实时间 = 8秒仿真时间
-        - 16倍速：1秒真实时间 = 16秒仿真时间
-        
-        Args:
-            duration_seconds: 仿真时长（秒）
-            speed: 仿真速度倍数（1/2/8/16）
-        """
+        """小步推进与可中断等待，停止后不再有后台状态写入。"""
         try:
-            # 运行SimPy仿真
-            # 根据速度倍数控制时间推进
-            if speed == 1:
-                # 1倍速：1秒真实时间 = 1秒仿真时间
-                start_time = time.time()
-                last_sim_time = 0.0
-                
-                while self.env.now < duration_seconds and self.is_running:
-                    if self.is_paused:
-                        # 如果暂停，等待恢复
-                        time.sleep(0.1)
-                        start_time = time.time() - self.env.now  # 调整起始时间，保持同步
-                        continue
-                    
-                    # 计算已经过的真实时间
-                    elapsed_real_time = time.time() - start_time
-                    
-                    # 如果仿真时间落后于真实时间，需要推进
-                    if elapsed_real_time > self.env.now:
-                        # 每次推进1秒仿真时间
-                        target_time = min(self.env.now + 1.0, duration_seconds)
-                        
-                        # 推进仿真到目标时间
-                        if target_time > self.env.now:
-                            try:
-                                self.env.run(until=target_time)
-                            except:
-                                pass  # 忽略中断错误
-                        
-                        # 如果推进了1秒仿真时间，sleep 1秒真实时间
-                        if self.env.now - last_sim_time >= 1.0:
-                            time.sleep(1.0)  # sleep 1秒真实时间
-                            last_sim_time = self.env.now
-                    else:
-                        # 如果仿真时间已经达到或超过真实时间，等待真实时间追上
-                        time.sleep(0.1)
-            else:
-                # 加速模式：根据速度倍数控制时间推进
-                # 例如：2倍速 = 1秒真实时间 = 2秒仿真时间
-                #       8倍速 = 1秒真实时间 = 8秒仿真时间
-                #       16倍速 = 1秒真实时间 = 16秒仿真时间
-                start_time = time.time()
-                last_update_time = 0.0
-                
-                while self.env.now < duration_seconds and self.is_running:
-                    if self.is_paused:
-                        # 如果暂停，等待恢复
-                        time.sleep(0.1)
-                        start_time = time.time() - self.env.now / speed  # 调整起始时间
-                        continue
-                    
-                    # 计算已经过的真实时间
-                    elapsed_real_time = time.time() - start_time
-                    
-                    # 计算应该推进到的仿真时间（基于真实时间和速度倍数）
-                    # 例如：2倍速时，1秒真实时间 = 2秒仿真时间
-                    target_sim_time = elapsed_real_time * speed
-                    
-                    # 如果仿真时间落后于目标时间，需要推进
-                    if target_sim_time > self.env.now:
-                        # 每次推进一个小步长（避免一次性推进太多）
-                        step_size = 1.0  # 每次推进1秒仿真时间
-                        target_time = min(self.env.now + step_size, duration_seconds, target_sim_time)
-                        
-                        # 推进仿真到目标时间
-                        if target_time > self.env.now:
-                            try:
-                                self.env.run(until=target_time)
-                            except:
-                                pass  # 忽略中断错误
-                        
-                        # 控制更新频率：每推进step_size秒仿真时间，sleep step_size/speed秒真实时间
-                        # 例如：2倍速时，推进2秒仿真时间，sleep 1秒真实时间
-                        if self.env.now - last_update_time >= step_size:
-                            sleep_time = step_size / speed  # 根据速度计算需要sleep的真实时间
-                            time.sleep(sleep_time)
-                            last_update_time = self.env.now
-                    else:
-                        # 如果仿真时间已经达到或超过目标时间，等待真实时间追上
-                        time.sleep(0.1)
-        except Exception as e:
-            print(f"仿真运行错误：{e}")
+            while self.env.now < duration_seconds and self.is_running:
+                if self.is_paused:
+                    self._stop_event.wait(0.05)
+                    continue
+                previous = self.env.now
+                target = min(previous + 1.0, duration_seconds)
+                self.env.run(until=target)
+                self._stop_event.wait((target - previous) / speed)
+            self.status = "completed" if self.env.now >= duration_seconds else "stopped"
+        except Exception as error:
+            self.status = "failed"
+            self.error_message = str(error)
+            self._emit_alert(Alert("simulation_error", "critical", "", str(error)))
         finally:
-            # 仿真结束，更新状态
             self.is_running = False
-    
+
     def pause(self) -> None:
         """
         暂停仿真
@@ -1330,6 +1319,8 @@ class SimulationEngine:
         这样可以通过resume()恢复仿真，而不需要重新创建引擎
         """
         self.is_paused = True
+        if self.is_running:
+            self.status = "paused"
     
     def resume(self) -> None:
         """
@@ -1339,17 +1330,21 @@ class SimulationEngine:
         仿真线程会继续运行
         """
         self.is_paused = False
+        if self.is_running:
+            self.status = "running"
     
     def stop(self) -> None:
-        """
-        停止仿真
-
-        仿真循环按小步长推进（≤1 秒仿真时间），设置 is_running=False 后
-        线程会在下一个循环检查时退出；SimPy Environment 本身没有
-        interrupt 方法，因此无需也不能直接中断环境。
-        """
+        """请求停止并等后台线程退出，随后可安全构建部分运行结果。"""
         self.is_running = False
-    
+        self._stop_event.set()
+        thread = self._sim_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                raise RuntimeError("仿真线程尚未停止，请稍后重试")
+        if self.status == "running":
+            self.status = "stopped"
+
     def get_results(self) -> Dict[str, Any]:
         """
         获取仿真结果
@@ -1364,94 +1359,51 @@ class SimulationEngine:
             'bottleneck': self.line.find_bottleneck()
         }
 
-    def run_sync(self, duration_hours: float = 8.0, warmup_minutes: float = 0.0) -> SimulationResult:
+    def run_sync(
+        self, duration_hours: float = 8.0, warmup_minutes: float = 0.0,
+        cancel_event=None,
+    ) -> SimulationResult:
+        """同步可取消仿真，统计半开窗口[预热结束,实际结束)。
+
+        预热保留物理库存与WIP；计数、费用、时间指标均用同一测量窗口。
         """
-        同步（headless）运行仿真
-
-        不启动独立线程，直接运行 SimPy 环境到结束，返回聚合结果。
-        用于自动化测试与报告导出，不依赖 GUI。
-
-        Args:
-            duration_hours: 仿真时长（小时）
-
-        Returns:
-            SimulationResult: 仿真结果聚合对象
-        """
-        self.is_running = True
-        self.is_paused = False
+        self._prepare_run(duration_hours, warmup_minutes, cancel_event)
         self.speed = 1
-
-        self.station_outputs = {station.id: 0 for station in self.line.stations}
-        self.station_wips = {station.id: 0 for station in self.line.stations}
-        self.total_output = 0
-        self.batch_results = []
-        self.quality_results = []
-        self.cleaning_events = []
-        self.material_events = []
-        self._material_alerted = set()
-        self._inventory = (
-            dict(self.line.inventory)
-            if self.line.inventory
-            else {m.name: m.initial_stock for m in self.line.materials}
-        )
-        self._rng = random.Random(self.random_seed)
-        self._blockage_state = {}
-        self._blockage_since = {}
-        self._blockage_full_since = {}
-        self._predict_alerted = set()
-        self.station_running_seconds = {}
-        self.station_starved_seconds = {}
-        self.station_blocked_seconds = {}
-        self._starvation_alerted = set()
-        self._blocked_alerted = set()
-        self._tank_full_alerted = set()
-        self._last_clean_hour = 0.0
-
-        self.env = simpy.Environment()
-        self._init_resources()
-        if self.line.production_type == ProductionType.LIQUID_FILLING:
-            # 烟油：批次排产序列驱动（V3.2）
-            self.env.process(self._batch_sequence_process())
-            self.env.process(self._tank_drain_process())
-        else:
-            # 组装 / 尼古丁袋：工序进程驱动（袋装使用机台节拍）
-            self._spawn_station_processes()
-        self.env.process(self._material_arrival_process())
-        self.env.process(self._monitor_bottleneck())
-        self.env.process(self._monitor_wip())
-        self.env.process(self._monitor_starvation())
-        self.env.process(self._update_state_periodically())
-
-        full_seconds = duration_hours * 3600
-        self.duration_seconds = full_seconds
-
-        # 冷启动/稳态（P1）：预热后重置计数，保留在制品
-        if warmup_minutes > 0:
-            warmup_seconds = min(warmup_minutes * 60, full_seconds)
-            self.env.run(until=warmup_seconds)
-            self.total_output = 0
-            self.station_outputs = {sid: 0 for sid in self.station_outputs}
-            self.station_wips = {sid: 0 for sid in self.station_wips}
-            self.wip_samples = []
-            self.batch_results = []
-            self.quality_results = []
-            self.cleaning_events = []
-            self.station_running_seconds = {}
-            self.station_starved_seconds = {}
-            self.station_blocked_seconds = {}
-            self.alert_log = []
-            self._blockage_state = {}
-            self._blockage_since = {}
-            self._predict_alerted = set()
-            self._starvation_alerted = set()
-            self._blocked_alerted = set()
-
-        self.env.run(until=full_seconds)
-        self.is_running = False
-        return self.build_result()
+        try:
+            stop_at = self.env.timeout(self.duration_seconds)
+            while not stop_at.processed:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError("仿真已取消")
+                self.env.step()
+            self.status = "completed"
+            return self.build_result()
+        except CancelledError:
+            self.status = "cancelled"
+            raise
+        except Exception:
+            self.status = "failed"
+            raise
+        finally:
+            self.is_running = False
 
     def build_result(self) -> SimulationResult:
-        """构建仿真结果聚合对象（用于报告导出与测试）"""
+        """同一实际测量窗口内的良品、费用和资源时间；理论值另行保留。"""
+        elapsed = float(self.env.now) if self.env is not None else 0.0
+        start = min(self.warmup_seconds, elapsed)
+        duration = max(0.0, elapsed - start)
+        material_events = [event for event in self.material_events
+                           if start <= event.get('time', 0) < elapsed]
+        quality_results = [event for event in self.quality_results
+                           if start <= event.get('time', 0) < elapsed]
+        batch_results = [batch for batch in self.batch_results
+                         if start <= batch.get('end_time', 0) < elapsed]
+        unit_costs = {material.name: material.unit_cost for material in self.line.materials}
+        material_cost = sum(event.get('quantity', 0.0) * unit_costs.get(
+            event.get('material', ''), 0.0
+        ) for event in material_events if event.get('type') == 'consume')
+        labor_cost = (
+            self.line.total_worker_count() * self.line.worker_hourly_wage * duration / 3600
+        )
         kpis = {
             'bottleneck_capacity': self.line.get_bottleneck_capacity(),
             'daily_output': self.line.calculate_daily_output(),
@@ -1459,197 +1411,142 @@ class SimulationEngine:
             'unit_cost': self.line.calculate_unit_cost(),
             'balance_rate': self.line.calculate_line_balance_rate(),
             'upph': self.line.calculate_upph(),
+            'actual_output': self.total_output,
+            'actual_hourly_output': self.total_output / (duration / 3600) if duration else 0.0,
+            'actual_labor_cost': round(labor_cost, 6),
+            'labor_cost': round(labor_cost, 6),
+            'material_cost': round(material_cost, 6),
+            'total_actual_cost': round(labor_cost + material_cost, 6),
+            'actual_unit_cost': labor_cost / self.total_output if self.total_output > 0 else None,
+            'batch_cycle_min': (sum(batch['cycle_min'] for batch in batch_results)
+                                / len(batch_results) if batch_results else 0.0),
+            'batch_pass_rate': (sum(batch.get('status') == 'released' for batch in batch_results)
+                                / len(batch_results) if batch_results else 0.0),
+            'yield_rate': self.line.calculate_avg_yield_rate(),
+            'machine_oee': self.line.calculate_avg_machine_oee(),
+            'shippable_quantity': self.total_output,
+            'rejected_batches': sum(batch.get('status') == 'rejected' for batch in batch_results),
         }
-
-        # V1.3 扩展 KPI
-        cleaning_seconds = sum(
-            e.get('clean_min', 0) for e in self.cleaning_events
-        ) * 60.0
-        kpis['batch_cycle_min'] = self.line.calculate_batch_cycle_min()
-        kpis['batch_pass_rate'] = self.line.calculate_batch_pass_rate()
-        kpis['yield_rate'] = self.line.calculate_avg_yield_rate()
-        kpis['machine_oee'] = self.line.calculate_avg_machine_oee()
-        # V3.2：放行/隔离
-        released = [b for b in self.batch_results if b.get('status') == 'released']
-        rejected = [b for b in self.batch_results if b.get('status') == 'rejected']
-        kpis['shippable_quantity'] = round(sum(b.get('yield_l', 0) for b in released), 3)
-        kpis['rejected_batches'] = len(rejected)
-        # V3.2：原料成本（按消耗量 × 原料单价）
-        material_cost = 0.0
-        material_cost_map = {
-            m.name: m.unit_cost for m in self.line.materials
-        }
-        for event in self.material_events:
-            if event.get('type') == 'consume':
-                material_cost += (
-                    event.get('quantity', 0.0)
-                    * material_cost_map.get(event.get('material', ''), 0.0)
-                )
-        kpis['material_cost'] = round(material_cost, 2)
-        kpis['cleaning_time_ratio'] = (
-            cleaning_seconds / self.duration_seconds if self.duration_seconds else 0.0
-        )
-
-        total_cost = self.line.calculate_total_cost()
-        total_yield_l = sum(b.get('yield_l', 0) for b in self.batch_results)
-        if total_yield_l > 0:
-            kpis['cost_per_liter'] = total_cost / total_yield_l
-        if self.total_output > 0:
-            kpis['cost_per_pouch'] = total_cost / self.total_output
-
-        # P1 工序级指标
-        station_metrics: Dict[str, Dict[str, float]] = {}
+        if self.line.production_type == ProductionType.LIQUID_FILLING:
+            kpis['cost_per_liter'] = kpis['actual_unit_cost']
+        elif self.line.production_type == ProductionType.POUCH_PACKAGING:
+            kpis['cost_per_pouch'] = kpis['actual_unit_cost']
+        intervals = list(self._time_intervals) + [
+            (station_id, kind, begun, elapsed)
+            for station_id, kind, begun in self._active_intervals.values()
+        ]
+        times = {}
+        cleaning_seconds = 0.0
+        for station_id, kind, begun, ended in intervals:
+            seconds = max(0.0, min(ended, elapsed) - max(begun, start))
+            times[(station_id, kind)] = times.get((station_id, kind), 0.0) + seconds
+            if kind == 'cleaning':
+                cleaning_seconds += seconds
+        kpis['cleaning_time_ratio'] = cleaning_seconds / duration if duration else 0.0
+        station_metrics = {}
         for station in self.line.stations:
-            running = self.station_running_seconds.get(station.id, 0.0)
-            waiting = self.station_starved_seconds.get(station.id, 0.0)
-            blocked = self.station_blocked_seconds.get(station.id, 0.0)
-            output = self.station_outputs.get(station.id, 0)
-            defects = sum(
-                1 for q in self.quality_results
-                if q.get('station_id') == station.id
+            running = times.get((station.id, 'running'), 0.0)
+            rework = times.get((station.id, 'rework'), 0.0)
+            waiting = times.get((station.id, 'waiting'), 0.0)
+            blocked = times.get((station.id, 'blocked'), 0.0)
+            resource_seconds = station.processing_units() * duration
+            utilization = (
+                min(1.0, (running + rework) / resource_seconds) if resource_seconds else 0.0
             )
-            duration = self.duration_seconds or 1.0
-            ideal_rate_per_sec = station.get_capacity() / 3600.0
-            availability = min(1.0, running / duration) if duration else 0.0
+            takt = (station.machine_takt if station.machine_takt is not None
+                    else station.process_time)
+            attempts = self._station_attempts.get(station.id, 0)
+            good = self._station_good.get(station.id, 0)
+            scrap = self._station_scrap.get(station.id, 0)
+            completed = good + scrap
+            # 最终质量处理完成才进入同一窗口的分子与分母，含预热期开始的返工件。
             performance = (
-                output / max(running * ideal_rate_per_sec, 1e-9)
-                if running > 0 and ideal_rate_per_sec > 0
-                else 0.0
+                min(1.0, completed * takt / (running + rework)) if running + rework else 0.0
             )
-            quality = output / (output + defects) if output + defects > 0 else 0.0
-            oee = availability * performance * quality
+            quality = good / completed if completed else 0.0
             station_metrics[station.id] = {
-                'name': station.name,
-                'capacity': round(station.get_capacity(), 1),
-                'running_sec': round(running, 1),
-                'waiting_sec': round(waiting, 1),
-                'blocked_sec': round(blocked, 1),
-                'utilization': round(running / self.duration_seconds, 4) if self.duration_seconds else 0.0,
-                'oee_availability': round(availability, 4),
-                'oee_performance': round(performance, 4),
-                'oee_quality': round(quality, 4),
-                'oee_total': round(oee, 4),
+                'name': station.name, 'capacity': round(station.get_capacity(), 3),
+                'resource_count': station.processing_units(),
+                'running_sec': round(running, 6), 'rework_sec': round(rework, 6),
+                'waiting_sec': round(waiting, 6), 'blocked_sec': round(blocked, 6),
+                'utilization': utilization, 'oee_availability': utilization,
+                'oee_performance': performance, 'oee_quality': quality,
+                'oee_total': utilization * performance * quality,
+                'good_output': good, 'scrap_count': scrap,
+                'completed_items': completed, 'processing_attempts': attempts,
             }
-
-        line_config = {
-            'name': self.line.name,
-            'production_type': self.line.production_type.value,
-            'shift_hours': self.line.shift_hours,
-            'break_minutes': self.line.break_minutes,
-            'worker_hourly_wage': self.line.worker_hourly_wage,
-            'cip_interval_batches': self.line.cip_interval_batches,
-            'cip_interval_hours': self.line.cip_interval_hours,
-            'changeover_matrix': self.line.changeover_matrix,
-            'materials': [
-                {
-                    'name': m.name,
-                    'unit': m.unit,
-                    'initial_stock': m.initial_stock,
-                    'unit_cost': m.unit_cost,
-                }
-                for m in self.line.materials
-            ],
-            'inventory': dict(self.line.inventory),
-            'material_arrivals': [
-                {
-                    'time_minutes': a.time_minutes,
-                    'material': a.material,
-                    'quantity': a.quantity,
-                }
-                for a in self.line.material_arrivals
-            ],
-            'stations': [
-                {
-                    'id': s.id,
-                    'name': s.name,
-                    'process_time': s.process_time,
-                    'worker_count': s.worker_count,
-                    'collaboration_type': s.collaboration_type.value,
-                    'oee': s.oee,
-                    'efficiency': s.efficiency,
-                    'changeover_time': s.changeover_time,
-                    'buffer_capacity': s.buffer_capacity,
-                    'machine_takt': s.machine_takt,
-                    'clean_time_minutes': s.clean_time_minutes,
-                    'sampling_rate': s.sampling_rate,
-                    'defect_rate': s.defect_rate,
-                    'rework_minutes': s.rework_minutes,
-                    'job_role': s.job_role.value,
-                    'cleanroom_zone': s.cleanroom_zone,
-                    'bom': dict(s.bom),
-                }
-                for s in self.line.stations
-            ],
-        }
-
+        if self.line.production_type == ProductionType.LIQUID_FILLING:
+            station_metrics = {}
+        line_config = copy.deepcopy(getattr(self, '_input_config', self.line.to_dict()))
+        for station in line_config.get('stations', []):
+            for key in ('current_status', 'wip_count', 'total_output'):
+                station.pop(key, None)
+        for batch in line_config.get('batches', []):
+            for key in ('status', 'start_time', 'end_time', 'pass_rate', 'rework_count'):
+                batch.pop(key, None)
+        self.station_wips = {sid: len(buffer.items) for sid, buffer in self.buffers.items()}
+        scope = ('recipe_batch_flow_no_station_staffing_capacity'
+                 if self.line.production_type == ProductionType.LIQUID_FILLING
+                 else 'discrete_station_flow')
         return SimulationResult(
-            line_name=self.line.name,
-            duration_seconds=self.duration_seconds,
-            total_output=self.total_output,
-            station_outputs=self.station_outputs.copy(),
-            station_wips=self.station_wips.copy(),
-            kpis=kpis,
-            alerts=list(self.alert_log),
-            wip_samples=list(self.wip_samples),
-            changeover_events=list(self.changeover_events),
-            batch_results=list(self.batch_results),
-            quality_results=list(self.quality_results),
-            cleaning_events=list(self.cleaning_events),
-            material_events=list(self.material_events),
-            inventory=dict(self._inventory),
-            labor_summary=dict(self.line.labor_config),
-            unit=self.line.get_unit(),
-            station_metrics=station_metrics,
-            line_config=line_config,
+            line_name=self.line.name, duration_seconds=self.duration_seconds,
+            total_output=self.total_output, station_outputs=self.station_outputs.copy(),
+            station_wips=self.station_wips.copy(), kpis=kpis,
+            alerts=[alert for alert in self.alert_log if alert.timestamp_minutes * 60 >= start],
+            wip_samples=[sample for sample in self.wip_samples if sample.get('time', 0) >= start],
+            changeover_events=copy.deepcopy(self.changeover_events), batch_results=batch_results,
+            quality_results=quality_results, cleaning_events=list(self.cleaning_events),
+            material_events=material_events, inventory=dict(self._inventory),
+            labor_summary=dict(self.line.labor_config), unit=self.line.get_unit(),
+            station_metrics=station_metrics, line_config=line_config,
+            run_id=self.run_id, config_revision=self.config_revision, random_seed=self.random_seed,
+            elapsed_seconds=elapsed, measurement_seconds=duration,
+            warmup_seconds=self.warmup_seconds, status=self.status, model_scope=scope,
+            closing_tanks=[tank.to_dict() for tank in self.line.tanks],
+            incomplete_batches=[dict(batch.to_dict(), **self._batch_runtime.get(batch.id, {}))
+                                for batch in self.line.batches
+                                if batch.status not in (
+                                    BatchStatus.RELEASED, BatchStatus.REJECTED
+                                )],
+            liquid_balance={
+                'initial_tank_quantity': sum(self._initial_tank_levels.values()),
+                'produced_good_quantity': sum(item.get('produced_good_quantity', 0.0)
+                                              for item in self._batch_runtime.values()),
+                'drained_quantity': self._tank_drained_quantity,
+                'closing_tank_quantity': sum(tank.current_level_l for tank in self.line.tanks),
+                'pending_tank_quantity': sum(item.get('pending_tank_quantity', 0.0)
+                                            for item in self._batch_runtime.values()),
+            } if self.line.production_type == ProductionType.LIQUID_FILLING else {},
         )
 
 
 
-
-
-def detect_waste(stations: List[Station], bottleneck_capacity: float, threshold: float = 1.2) -> List[Alert]:
-    """
-    检测资源浪费（产能过剩的工序）
-    
-    算法思路：
-    1. 计算每个工序的实际产能
-    2. 找出产能超过瓶颈产能 × threshold 的工序
-    3. 对于并联工序，计算可以减少的工人数
-    4. 生成浪费警报
-    
-    Args:
-        stations: 工序列表
-        bottleneck_capacity: 瓶颈产能（颗/小时）
-        threshold: 阈值，默认1.2（超过瓶颈20%算浪费）
-        
-    Returns:
-        List[Alert]: 浪费警报列表
-    """
+def detect_waste(
+    stations: List[Station], bottleneck_capacity: float, threshold: float = 1.2,
+    worker_hourly_wage: float = 20.0, shift_hours: float = 8.0,
+) -> List[Alert]:
+    """人工并联工序的能力冗余估算；不从设备能力推导可裁减操作员。"""
+    if not math.isfinite(bottleneck_capacity) or bottleneck_capacity <= 0:
+        return []
     alerts = []
-    
     for station in stations:
-        actual_capacity = station.get_capacity()
-        
-        # 如果产能超过阈值，判定为浪费
-        if actual_capacity > bottleneck_capacity * threshold:
-            # 计算最优人数（对于并联工序）
-            if station.collaboration_type == CollaborationType.PARALLEL:
-                # 计算满足瓶颈产能所需的最少人数
-                theoretical_per_worker = 3600 / station.process_time * station.oee * station.efficiency
-                optimal_workers = int(bottleneck_capacity / theoretical_per_worker) + 1
-                
-                # 如果可以减少人数
-                if station.worker_count > optimal_workers:
-                    reducible = station.worker_count - optimal_workers
-                    daily_savings = reducible * 20.0 * 8  # 节省成本（元/天）
-                    
-                    alert = Alert(
-                        alert_type="waste",
-                        severity="warning",
-                        station_id=station.id,
-                        message=f"{station.name}产能过剩{(actual_capacity/bottleneck_capacity-1)*100:.0f}%",
-                        suggestion=f"建议减少{reducible}人，可节约成本{daily_savings:.0f}元/天"
-                    )
-                    alerts.append(alert)
-    
+        if (station.machine_takt is not None
+                or station.collaboration_type != CollaborationType.PARALLEL):
+            continue
+        capacity = station.get_capacity()
+        if capacity <= bottleneck_capacity * threshold:
+            continue
+        per_worker = capacity / station.worker_count
+        optimal_workers = math.ceil(bottleneck_capacity / per_worker)
+        reducible = station.worker_count - optimal_workers
+        if reducible <= 0:
+            continue
+        savings = reducible * worker_hourly_wage * shift_hours
+        excess = (capacity / bottleneck_capacity - 1) * 100
+        alerts.append(Alert(
+            alert_type="waste", severity="warning", station_id=station.id,
+            message=f"{station.name}产能过剩{excess:.0f}%",
+            suggestion=(f"估算可减少{reducible}人，按时薪{worker_hourly_wage:g}元、"
+                        f"{shift_hours:g}小时/班可节约{savings:.0f}元/班；需现场验证"),
+        ))
     return alerts

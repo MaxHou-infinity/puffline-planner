@@ -52,16 +52,19 @@ def test_stop_always_stops_engine_when_snapshot_fails(monkeypatch):
     calls = []
     widget = SimpleNamespace(config=lambda **kwargs: None)
     window.simulation_engine = SimpleNamespace(
-        total_output=7, build_result=lambda: object(),
+        total_output=7, build_result=lambda: SimpleNamespace(duration_seconds=10),
         stop=lambda: calls.append("stopped"),
     )
-    window.production_line = SimpleNamespace(stations=[])
+    window.production_line = SimpleNamespace(stations=[], configuration_revision=lambda: 'r1')
+    window._run_line = None
+    window._lock_configuration = lambda value: None
     window.logger = SimpleNamespace(exception=lambda *args: None)
     window.btn_start = window.btn_pause = window.btn_stop = widget
     window.btn_changeover = window.speed_combo = window.status_bar = widget
     window.config_panel = SimpleNamespace(set_editable=lambda value: None)
     window.kpi_dashboard = SimpleNamespace(
-        set_run_state=lambda state: None, update_actual_output=lambda value: None
+        set_run_state=lambda state: None, update_actual_output=lambda value: None,
+        update_timestamp=lambda value: None,
     )
     window.canvas_view = SimpleNamespace(
         drag_enabled=False, update_production_line=lambda line: None
@@ -69,7 +72,7 @@ def test_stop_always_stops_engine_when_snapshot_fails(monkeypatch):
     monkeypatch.setattr(gui_main, "build_snapshot", lambda *args: (_ for _ in ()).throw(ValueError("bad")))
     monkeypatch.setattr(gui_main.messagebox, "showwarning", lambda *args: calls.append("warned"))
     window._btn_stop_simulation()
-    assert calls == ["warned", "stopped"]
+    assert calls == ["stopped", "warned"]
     assert window.simulation_engine is None
 
 

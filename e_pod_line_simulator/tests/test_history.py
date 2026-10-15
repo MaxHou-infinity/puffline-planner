@@ -73,3 +73,36 @@ def test_clear_history_removes_file(tmp_path):
 
     assert clear_history(path) is True
     assert load_history(path) == []
+
+
+def test_corrupt_history_is_not_overwritten(tmp_path):
+    path = tmp_path / "history.json"
+    path.write_text("{broken original", encoding="utf-8")
+    assert append_snapshot(build_snapshot(make_line()), str(path)) is False
+    assert path.read_text(encoding="utf-8") == "{broken original"
+
+
+def test_history_preserves_run_identity_and_unknown_cost(tmp_path):
+    from src.models import SimulationResult
+    result = SimulationResult(
+        line_name="original-run", duration_seconds=30, total_output=0,
+        station_outputs={}, station_wips={}, kpis={"actual_unit_cost": None},
+        unit="千克", line_config={"production_type": "liquid_filling"},
+    )
+    record = build_snapshot(make_line(), result)
+    assert record["line_name"] == "original-run"
+    assert record["unit"] == "千克"
+    assert record["kpis"]["actual_unit_cost"] is None
+    path = str(tmp_path / "identity.json")
+    assert append_snapshot(record, path)
+    assert load_history(path)[0]["source"] == "simulation"
+
+
+def test_history_invalid_container_and_write_error(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text('{}', encoding="utf-8")
+    assert load_history(str(bad)) == []
+    assert append_snapshot({}, str(bad)) is False
+    assert append_snapshot({}, str(tmp_path)) is False
+    assert clear_history(str(tmp_path)) is False
+    assert export_history(str(tmp_path / 'empty.xlsx'), []) is False

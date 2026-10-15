@@ -3,19 +3,37 @@
 
 功能：
 - export_excel(): 导出多 Sheet 的 Excel 报告（KPI、工序产出、报警、WIP 采样、切换事件）
-- export_pdf(): 导出 PDF 摘要报告（中文字体优先，缺失时回退 Helvetica）
+- export_pdf(): 导出 PDF 摘要报告（内嵌中文字体）
 - export_report(): 按文件扩展名自动分派
 """
 
 import os
 import json
+import re
 from typing import List, Optional
+from xml.sax.saxutils import escape
 
 from src.models import SimulationResult
 
 
+def _keep_section_headers(story):
+    """Keep a section heading and its spacer with the first following content."""
+    for index, item in enumerate(story):
+        if re.match(r"^[一二三四五六七八九十]+、", getattr(item, 'text', '')):
+            item.keepWithNext = True
+            if index + 1 < len(story) and story[index + 1].__class__.__name__ == 'Spacer':
+                story[index + 1].keepWithNext = True
+
+
 # 中文字体候选路径（按优先级）
+_BUNDLED_CN_FONT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "assets", "fonts", "NotoSansSC-Regular.ttf",
+)
 _CN_FONT_CANDIDATES = [
+    _BUNDLED_CN_FONT,
+    os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "msyh.ttc"),
+    os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "simsun.ttc"),
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/STHeiti Medium.ttc",
@@ -31,7 +49,7 @@ def _register_cn_font() -> str:
     注册中文字体，返回字体名称
 
     Returns:
-        str: 可用的字体名称（找不到中文字体时回退 "Helvetica"）
+        str: 可嵌入的中文字体名称；字体缺失时报告明确错误。
     """
     global _CN_FONT_NAME, _CN_FONT_REGISTERED
     if _CN_FONT_REGISTERED:
@@ -55,7 +73,7 @@ def _register_cn_font() -> str:
         pass
 
     if _CN_FONT_NAME is None:
-        _CN_FONT_NAME = "Helvetica"
+        raise RuntimeError("未找到可嵌入的中文字体，请检查应用 assets/fonts 是否完整")
     _CN_FONT_REGISTERED = True
     return _CN_FONT_NAME
 
@@ -63,21 +81,38 @@ def _register_cn_font() -> str:
 def _kpi_rows(result: SimulationResult) -> List[List[str]]:
     """构造 KPI 表格行（中文标签 + 值）"""
     k = result.kpis
-    duration_minutes = result.duration_seconds / 60.0
+    duration_minutes = (result.elapsed_seconds if getattr(result, "run_id", "")
+                        else result.duration_seconds) / 60.0
     unit = result.unit
     rows = [
         ["产线名称", result.line_name],
-        ["仿真时长(分钟)", f"{duration_minutes:.1f}"],
+        ["实际经过时间(分钟)", f"{duration_minutes:.2f}"],
+        ["计划仿真时长(分钟)", f"{result.duration_seconds / 60:.2f}"],
         [f"总产出({unit})", f"{result.total_output}"],
         [f"可发运产出({unit})", f"{k.get('shippable_quantity', result.total_output)}"],
         ["隔离批次", f"{k.get('rejected_batches', 0)}"],
         [f"瓶颈产能({unit}/h)", f"{k.get('bottleneck_capacity', 0):.1f}"],
         [f"预计日产量({unit})", f"{k.get('daily_output', 0):.0f}"],
-        ["日成本(元)", f"{k.get('total_cost', 0):.0f}"],
-        [f"单位成本(元/{unit})", f"{k.get('unit_cost', 0):.3f}"],
+        ["预计日人工成本(元)", f"{k.get('total_cost', 0):.2f}"],
+        [f"预计单位人工成本(元/{unit})", f"{k.get('unit_cost', 0):.3f}"],
         ["产线平衡率", f"{k.get('balance_rate', 0) * 100:.1f}%"],
         [f"UPPH({unit}/人·h)", f"{k.get('upph', 0):.1f}"],
     ]
+    rows.extend([
+        ["运行ID", str(getattr(result, "run_id", ""))],
+        ["配置修订", str(getattr(result, "config_revision", ""))],
+        ["随机种子", str(getattr(result, "random_seed", None))],
+        ["运行状态", str(getattr(result, "status", ""))],
+        ["模型范围", ("配方批次流；不支持按工序人数反推烟油产能"
+                       if getattr(result, "model_scope", "").startswith("recipe_batch")
+                       else "离散工序流")],
+        ["统计窗口(分钟)", f"{getattr(result, 'measurement_seconds', result.duration_seconds) / 60:.2f}"],
+        ["预热(分钟)", f"{getattr(result, 'warmup_seconds', 0) / 60:.2f}"],
+        ["本次人工成本(元)", f"{k.get('actual_labor_cost', k.get('labor_cost', 0)):.2f}"],
+        [f"本次单位人工成本(元/{unit})",
+         f"{k['actual_unit_cost']:.3f}" if k.get('actual_unit_cost') is not None else "无合格产出，无法计算"],
+        ["成本边界", "仅人工；原料成本单列，不代表完整制造成本"],
+    ])
     if k.get("material_cost") is not None:
         rows.append(["原料成本(元)", f"{k['material_cost']:.2f}"])
     if k.get("batch_cycle_min") is not None:
@@ -91,9 +126,9 @@ def _kpi_rows(result: SimulationResult) -> List[List[str]]:
     if k.get("cleaning_time_ratio") is not None:
         rows.append(["清洗时间占比", f"{k['cleaning_time_ratio']:.1%}"])
     if k.get("cost_per_liter") is not None:
-        rows.append([f"元/{unit}（批次收率口径）", f"{k['cost_per_liter']:.3f}"])
+        rows.append([f"人工元/{unit}（批次收率口径）", f"{k['cost_per_liter']:.3f}"])
     if k.get("cost_per_pouch") is not None:
-        rows.append([f"元/{unit}（袋装口径）", f"{k['cost_per_pouch']:.3f}"])
+        rows.append([f"人工元/{unit}（本次良品口径）", f"{k['cost_per_pouch']:.3f}"])
     return rows
 
 
@@ -205,6 +240,8 @@ def export_excel(result: SimulationResult, file_path: str) -> bool:
                 ),
             ],
         ]
+        for key in ("recipes", "batches", "tanks", "labor_config", "cleanroom_limits", "skill_matrix"):
+            config_rows.append([key, json.dumps(lc.get(key, []), ensure_ascii=False)])
         for material in lc.get("materials", []):
             config_rows.append([
                 f"原料-{material.get('name', '')}",
@@ -222,7 +259,7 @@ def export_excel(result: SimulationResult, file_path: str) -> bool:
             config_rows.append([
                 f"工序-{station.get('name', '')}",
                 (
-                    f"人数{station.get('worker_count', 0)}/"
+                    f"人数{station.get('worker_count', 0)}/机台{station.get('machine_count', 1)}/"
                     f"缓冲{station.get('buffer_capacity', 0)}/"
                     f"节拍{station.get('machine_takt') or '-'}/"
                     f"工种{station.get('job_role', '')}"
@@ -252,6 +289,18 @@ def export_excel(result: SimulationResult, file_path: str) -> bool:
                 material_df.to_excel(writer, sheet_name="原料事件", index=False)
             if not config_df.empty:
                 config_df.to_excel(writer, sheet_name="产线配置", index=False)
+            if getattr(result, "closing_tanks", []):
+                pd.DataFrame(result.closing_tanks).to_excel(
+                    writer, sheet_name="期末罐存", index=False
+                )
+            if getattr(result, "incomplete_batches", []):
+                pd.DataFrame(result.incomplete_batches).to_excel(
+                    writer, sheet_name="未完成批次", index=False
+                )
+            if getattr(result, "liquid_balance", {}):
+                pd.DataFrame(list(result.liquid_balance.items()), columns=["指标", "数量"]).to_excel(
+                    writer, sheet_name="液体守恒", index=False
+                )
 
         return True
     except Exception:
@@ -321,7 +370,12 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
         )
 
         def _pdf_table(rows, widths, header=True):
-            table = Table(rows, colWidths=widths, repeatRows=1 if header else 0)
+            wrapped = [
+                [Paragraph(escape(str(value)).replace("\n", "<br/>"), body_style)
+                 for value in row]
+                for row in rows
+            ]
+            table = Table(wrapped, colWidths=widths, repeatRows=1 if header else 0)
             style = [
                 ("FONTNAME", (0, 0), (-1, -1), font_name),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -336,10 +390,10 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
             return table
 
         story = [
-            Paragraph(f"电子烟产线仿真报告 - {result.line_name}", title_style),
+            Paragraph(f"产线仿真报告 - {escape(result.line_name)}", title_style),
             Spacer(1, 8 * mm),
             Paragraph(
-                f"仿真时长：{result.duration_seconds / 60:.1f} 分钟　"
+                f"实际经过时间：{(result.elapsed_seconds if getattr(result, 'run_id', '') else result.duration_seconds) / 60:.2f} 分钟　"
                 f"总产出：{result.total_output} {result.unit}",
                 body_style,
             ),
@@ -376,7 +430,7 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
                 f"原料-{material.get('name', '')}",
                 f"{material.get('initial_stock', 0)} {material.get('unit', '')}",
             ])
-        for station in lc.get("stations", [])[:12]:
+        for station in lc.get("stations", []):
             config_rows.append([
                 f"工序-{station.get('name', '')}",
                 (
@@ -405,7 +459,7 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
             story.append(Spacer(1, 6 * mm))
             story.append(Paragraph("三、工序指标（含 OEE）", header_style))
             story.append(Spacer(1, 3 * mm))
-            story.append(_pdf_table(metric_rows, [40 * mm, 25 * mm, 25 * mm, 25 * mm, 30 * mm, 30 * mm]))
+            story.append(_pdf_table(metric_rows, [35 * mm, 25 * mm, 25 * mm, 25 * mm, 30 * mm, 30 * mm]))
 
         # 四、失衡分析
         imbalance_rows = [["工序", "结论"]]
@@ -463,6 +517,22 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
                 ])
             story.append(_pdf_table(batch_rows, [30 * mm, 35 * mm, 35 * mm, 30 * mm, 40 * mm]))
 
+        if result.changeover_events:
+            story.append(Spacer(1, 6 * mm))
+            title = "换型事件" if result.batch_results else "六、换型事件"
+            story.append(Paragraph(title, header_style))
+            story.append(Spacer(1, 3 * mm))
+            event_rows = [["工序", "申请(分)", "开始(分)", "结束(分)", "时长(分)", "状态"]]
+            for event in result.changeover_events:
+                times = [event.get(key) for key in ('requested_time', 'start_time', 'end_time')]
+                event_rows.append([
+                    str(event.get('station_name', event.get('station_id', ''))),
+                    *[f"{value / 60:.2f}" if value is not None else "-" for value in times],
+                    str(event.get('minutes', '')),
+                    str(event.get('status', '')),
+                ])
+            story.append(_pdf_table(event_rows, [40 * mm] + [26 * mm] * 5))
+
         if result.material_events:
             story.append(Spacer(1, 6 * mm))
             story.append(Paragraph("七、原料事件", header_style))
@@ -478,12 +548,34 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
             story.append(_pdf_table(material_rows, [35 * mm, 35 * mm, 50 * mm, 50 * mm]))
 
         story.append(Spacer(1, 6 * mm))
+        if getattr(result, "liquid_balance", {}):
+            story.append(Paragraph("八、全程液体守恒与未完成批次", header_style))
+            story.append(Spacer(1, 3 * mm))
+            balance_labels = {
+                "initial_tank_quantity": "期初罐存", "produced_good_quantity": "完成QC良品量",
+                "drained_quantity": "罐已排出量", "closing_tank_quantity": "期末罐存",
+                "pending_tank_quantity": "待入罐量",
+            }
+            rows = [["指标（覆盖整次运行，含预热）", f"数量({result.unit})"]]
+            rows.extend([[balance_labels.get(key, key), f"{value:.3f}"]
+                         for key, value in result.liquid_balance.items()])
+            rows.append(["未完成批次数", str(len(result.incomplete_batches))])
+            story.append(_pdf_table(rows, [110 * mm, 60 * mm]))
+            for batch in result.incomplete_batches:
+                story.append(Paragraph(
+                    escape(f"批次{batch.get('id', '')}：{batch.get('stage', batch.get('status', ''))}；"
+                           f"已入罐{batch.get('stored_quantity', 0)}，"
+                           f"待入罐{batch.get('pending_tank_quantity', 0)} {result.unit}；未计入完成放行量"),
+                    body_style,
+                ))
+            story.append(Spacer(1, 6 * mm))
         story.append(Paragraph(
             "注：本报告由仿真工具自动生成，结果作为产线设计参考，"
             "建议结合实际生产数据校准 OEE 等参数。",
             body_style,
         ))
 
+        _keep_section_headers(story)
         doc.build(story)
         return True
     except Exception:
@@ -500,12 +592,20 @@ def export_hr_report(summary: dict, file_path: str) -> bool:
             ["目标日产量", summary.get("daily_target", 0)],
             ["每日有效工时(小时)", summary.get("effective_hours_per_day", 0)],
             ["每小时需求", summary.get("required_hourly", 0)],
-            ["人力需求合计(最低人数)", summary.get("total_headcount", 0)],
+            ["每班最低岗位人数", summary.get("headcount_per_shift", 0)],
+            ["每日班组数", summary.get("shifts_per_day", 1)],
+            ["每班覆盖编制(含缺勤)", summary.get("covered_headcount_per_shift", 0)],
+            ["全天覆盖编制(含缺勤)", summary.get("covered_headcount", 0)],
+            ["全天编制合计(不含缺勤覆盖)", summary.get("total_headcount", 0)],
+            ["产能可行", "是" if summary.get("capacity_feasible", True) else "否"],
+            ["人力计划可达", "是" if summary.get("feasible", True) else "否"],
+            ["约束说明", "；".join(summary.get("constraints", []))],
             ["当前在岗合计", summary.get("current_total", 0)],
-            ["富余人数(在岗−需求)", summary.get("excess_headcount", 0)],
+            ["富余人数(在岗−覆盖编制)", summary.get("excess_headcount", 0)],
             ["一次性招聘建议", summary.get("one_time_hiring", 0)],
-            ["首周净缺口(需求−在岗−到岗)", summary.get("initial_gap", 0)],
-            ["达产天数", summary.get("days_to_full", 0)],
+            ["初始缺口(覆盖编制−在岗)", summary.get("initial_gap", 0)],
+            ["覆盖编制达产天数", summary.get("days_to_full") if summary.get("days_to_full") is not None
+             else "计划内无法达产"],
         ], columns=["指标", "值"])
 
         derivation_df = pd.DataFrame([
@@ -527,10 +627,14 @@ def export_hr_report(summary: dict, file_path: str) -> bool:
         ])
 
         role_df = pd.DataFrame([
-            {"工种": role, "需求人数": n}
+            {"工种": role, "每班人数": summary.get("headcount_by_role_per_shift", {}).get(role, n),
+             "最低全天编制": n,
+             "覆盖全天编制": summary.get("covered_headcount_by_role", {}).get(role, n)}
             for role, n in summary.get("headcount_by_role", {}).items()
         ] + [{
-            "工种": "合计", "需求人数": summary.get("total_headcount", 0),
+            "工种": "合计", "每班人数": summary.get("headcount_per_shift", 0),
+            "最低全天编制": summary.get("total_headcount", 0),
+            "覆盖全天编制": summary.get("covered_headcount", 0),
         }])
 
         current_df = pd.DataFrame([
@@ -637,7 +741,14 @@ def export_hr_pdf(summary: dict, file_path: str) -> bool:
         costs = summary.get("costs", {})
 
         def _table(rows, widths, header=True):
-            table = Table(rows, colWidths=widths, repeatRows=1 if header else 0)
+            header_style = ParagraphStyle("HRHeaderCell", parent=body_style, textColor=colors.white)
+            wrapped = [
+                [Paragraph(escape(str(value)).replace("\n", "<br/>"),
+                           header_style if header and i == 0 else body_style)
+                 for value in row]
+                for i, row in enumerate(rows)
+            ]
+            table = Table(wrapped, colWidths=widths, repeatRows=1 if header else 0)
             style = [
                 ("FONTNAME", (0, 0), (-1, -1), font_name),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -663,11 +774,19 @@ def export_hr_pdf(summary: dict, file_path: str) -> bool:
             ["目标日产量", summary.get("daily_target", 0)],
             ["每日有效工时(小时)", summary.get("effective_hours_per_day", 0)],
             ["每小时需求", summary.get("required_hourly", 0)],
-            ["人力需求合计(最低人数)", summary.get("total_headcount", 0)],
+            ["每班最低岗位人数", summary.get("headcount_per_shift", 0)],
+            ["每日班组数", summary.get("shifts_per_day", 1)],
+            ["每班覆盖编制(含缺勤)", summary.get("covered_headcount_per_shift", 0)],
+            ["全天覆盖编制(含缺勤)", summary.get("covered_headcount", 0)],
+            ["全天编制合计(不含缺勤覆盖)", summary.get("total_headcount", 0)],
+            ["产能可行", "是" if summary.get("capacity_feasible", True) else "否"],
+            ["人力计划可达", "是" if summary.get("feasible", True) else "否"],
+            ["约束说明", "；".join(summary.get("constraints", []))],
             ["当前在岗合计", summary.get("current_total", 0)],
-            ["富余人数(在岗−需求)", summary.get("excess_headcount", 0)],
+            ["富余人数(在岗−覆盖编制)", summary.get("excess_headcount", 0)],
             ["一次性招聘建议", summary.get("one_time_hiring", 0)],
-            ["达产天数", summary.get("days_to_full", 0)],
+            ["覆盖编制达产天数", summary.get("days_to_full") if summary.get("days_to_full") is not None
+             else "计划内无法达产"],
         ]
         story.append(_table(overview_rows, [110 * mm, 50 * mm]))
         story.append(Spacer(1, 4 * mm))
@@ -685,18 +804,19 @@ def export_hr_pdf(summary: dict, file_path: str) -> bool:
             for d in summary.get("station_derivation", [])
         ]
         story.append(_table(
-            derivation_rows, [60 * mm, 20 * mm, 45 * mm, 20 * mm, 30 * mm]
+            derivation_rows, [55 * mm, 20 * mm, 45 * mm, 20 * mm, 30 * mm]
         ))
         story.append(Spacer(1, 4 * mm))
         story.append(Paragraph("三、人力需求（按工种）", body_style))
         story.append(Spacer(1, 2 * mm))
-        role_rows = [["工种", "所需人数"]]
+        role_rows = [["工种", "最低全天编制", "覆盖全天编制"]]
         role_rows += [
-            [role, str(count)]
+            [role, str(count), str(summary.get('covered_headcount_by_role', {}).get(role, count))]
             for role, count in summary.get("headcount_by_role", {}).items()
         ]
-        role_rows.append(["合计", str(summary.get("total_headcount", 0))])
-        story.append(_table(role_rows, [80 * mm, 40 * mm]))
+        role_rows.append(["合计", str(summary.get("total_headcount", 0)),
+                          str(summary.get('covered_headcount', 0))])
+        story.append(_table(role_rows, [70 * mm, 50 * mm, 50 * mm]))
         story.append(Spacer(1, 4 * mm))
         story.append(Paragraph("四、成本测算", body_style))
         story.append(Spacer(1, 2 * mm))
@@ -725,9 +845,11 @@ def export_hr_pdf(summary: dict, file_path: str) -> bool:
         story.append(Spacer(1, 4 * mm))
         story.append(Paragraph(
             f"六、结论：一次性招聘建议 {summary.get('one_time_hiring', 0)} 人；"
-            f"预计 {summary.get('days_to_full', 0)} 天达产。",
+            + (f"预计 {summary['days_to_full']} 天满足覆盖编制。"
+               if summary.get('days_to_full') is not None else "当前招聘/培训计划内无法达产。"),
             body_style,
         ))
+        _keep_section_headers(story)
         doc.build(story)
         return True
     except Exception:

@@ -1,6 +1,11 @@
 """敏感性试算测试（V3.1 P2 / V3.2 P1/P1.3）"""
 
-from src.models import Material, ProductionLine, Station
+import threading
+from concurrent.futures import CancelledError
+
+import pytest
+
+from src.models import Material, ProductionLine, ProductionType, Station
 from src.sensitivity import run_sensitivity, run_sweep
 
 
@@ -83,3 +88,53 @@ def test_sensitivity_material_price_variant():
     base = scenarios[0]
     assert up["material_cost"] > base["material_cost"]
     assert up["delta_material_cost"] > 0
+
+
+def test_price_only_changes_use_same_quality_seed_and_labor_cost():
+    line = ProductionLine('随机质检', shift_hours=1, break_minutes=0)
+    line.stations = [Station(
+        's', '质检', 1, 1, oee=1, efficiency=1, changeover_time=0,
+        sampling_rate=1, defect_rate=.3, bom={'零件': 1},
+    )]
+    line.materials = [Material('零件', '个', 1000, 2)]
+    rows = run_sensitivity(line, duration_hours=.02, simulation_seed=17)
+    price_rows = [row for row in rows if row['label'].startswith('原料价格')]
+    assert len(price_rows) == 2
+    assert all(row['total_output'] == rows[0]['total_output'] for row in price_rows)
+    assert all(row['actual_unit_cost'] == rows[0]['actual_unit_cost'] for row in price_rows)
+    assert all(row['simulation_seed'] == 17 for row in rows)
+    assert rows == run_sensitivity(line, duration_hours=.02, simulation_seed=17)
+
+
+def test_zero_good_output_has_no_unit_cost():
+    line = ProductionLine('零良品', shift_hours=1, break_minutes=0)
+    line.stations = [Station('s', '全废', 1, 1, sampling_rate=1, defect_rate=1)]
+    rows = run_sweep(line, 'worker_count', [1, 2], duration_hours=.01)
+    assert all(not row['feasible'] for row in rows)
+    assert all(row['actual_unit_cost'] is None and row['constraints'] for row in rows)
+
+
+def test_machine_sensitivity_changes_machine_count_not_people():
+    line = ProductionLine('机台', shift_hours=1, break_minutes=0)
+    line.stations = [Station('s', '机台', 1, 3, machine_takt=1, machine_count=1,
+                             oee=1, efficiency=1, changeover_time=0)]
+    rows = run_sensitivity(line, duration_hours=.01)
+    machine = next(row for row in rows if row['label'] == '增加1台机台')
+    assert machine['apply']['attr'] == 'machine_count'
+    assert machine['total_output'] > rows[0]['total_output']
+    assert machine['total_cost'] == rows[0]['total_cost']
+    assert line.stations[0].worker_count == 3
+
+
+def test_liquid_and_cancellation_do_not_produce_recommendations():
+    line = ProductionLine('烟油', production_type=ProductionType.LIQUID_FILLING)
+    with pytest.raises(ValueError, match='烟油'):
+        run_sensitivity(line)
+    with pytest.raises(ValueError, match='烟油'):
+        run_sweep(line, 'worker_count', [1])
+    event = threading.Event()
+    event.set()
+    with pytest.raises(CancelledError):
+        run_sensitivity(ProductionLine('取消'), cancel_event=event)
+    with pytest.raises(CancelledError):
+        run_sweep(ProductionLine('取消'), 'shift_hours', [1], cancel_event=event)

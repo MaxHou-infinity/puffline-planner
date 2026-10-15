@@ -19,6 +19,8 @@ import sys
 from typing import Callable, Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import logging
+import math
+import tempfile
 
 from src.models import (
     Batch,
@@ -38,7 +40,10 @@ from src.theme import status_color as _theme_status_color
 # ==================== 首次运行引导 ====================
 
 def get_app_data_dir(app_name: str = "PuffLinePlanner") -> str:
-    """返回应用用户数据目录（跨平台，不依赖第三方库）"""
+    """返回用户数据目录；PUFFLINE_DATA_DIR 可隔离测试，不在读取时写磁盘。"""
+    override = os.environ.get("PUFFLINE_DATA_DIR")
+    if override:
+        return str(Path(override).expanduser().resolve())
     home = Path.home()
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", str(home)))
@@ -47,11 +52,44 @@ def get_app_data_dir(app_name: str = "PuffLinePlanner") -> str:
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
     path = base / app_name
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
     return str(path)
+
+
+def atomic_write_json(path: str, data: Any) -> None:
+    """Write complete finite JSON before atomically replacing an existing file."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=str(target.parent),
+            prefix=".puffline-", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = stream.name
+            json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, str(target))
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def get_user_data_path(filename: str, migrate: bool = False) -> str:
+    """Copy valid legacy JSON once without deleting or overwriting its source."""
+    target = Path(get_app_data_dir()) / filename
+    if migrate and not target.exists():
+        legacy = Path(__file__).resolve().parent.parent / "configs" / filename
+        if legacy.is_file():
+            with legacy.open(encoding="utf-8") as stream:
+                data = json.load(stream)
+            atomic_write_json(str(target), data)
+    return str(target)
+
+
+def get_scenarios_path() -> str:
+    """Return the writable scenario store, migrating the old store on first use."""
+    return get_user_data_path("scenarios.json", migrate=True)
 
 
 def get_first_run_marker_path() -> str:
@@ -87,21 +125,21 @@ def parse_shift_params(
         hours = float(shift_hours.strip())
     except (TypeError, ValueError):
         raise ValueError(f"班次时长必须是大于 0 的数字，当前输入：{shift_hours!r}")
-    if hours <= 0:
+    if not math.isfinite(hours) or not 0 < hours <= 24:
         raise ValueError(f"班次时长必须大于 0，当前输入：{shift_hours!r}")
 
     try:
         minutes = float(break_minutes.strip())
     except (TypeError, ValueError):
         raise ValueError(f"休息时间必须是非负数字（分钟），当前输入：{break_minutes!r}")
-    if minutes < 0:
+    if not math.isfinite(minutes) or minutes < 0 or minutes >= hours * 60:
         raise ValueError(f"休息时间不能为负数，当前输入：{break_minutes!r}")
 
     try:
         hourly_wage = float(wage.strip())
     except (TypeError, ValueError):
         raise ValueError(f"工人时薪必须是大于 0 的数字，当前输入：{wage!r}")
-    if hourly_wage <= 0:
+    if not math.isfinite(hourly_wage) or hourly_wage <= 0:
         raise ValueError(f"工人时薪必须大于 0，当前输入：{wage!r}")
 
     return hours, minutes, hourly_wage
@@ -156,7 +194,9 @@ def load_config(file_path: str) -> Optional[ProductionLine]:
         
         # 从字典创建产线对象
         line = ProductionLine.from_dict(data)
-        
+        valid, error = validate_production_line(line, allow_empty=True)
+        if not valid:
+            raise ValueError(error)
         return line
         
     except json.JSONDecodeError as e:
@@ -201,8 +241,7 @@ def save_config(production_line: ProductionLine, file_path: str) -> bool:
         data = production_line.to_dict()
         
         # 写入JSON文件（格式化输出，便于阅读）
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(file_path, data)
         
         return True
         
@@ -231,64 +270,28 @@ def save_ui_config(config: Dict[str, Any]) -> bool:
         directory = os.path.dirname(UI_CONFIG_FILE)
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
-        with open(UI_CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+        atomic_write_json(UI_CONFIG_FILE, config)
         return True
     except Exception:
         return False
 
 
 def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optional[str]]:
-    """
-    从Excel文件导入产线配置
-    
-    Excel格式要求（标准模板）：
-    | 工序名 | 耗时(秒) | 人数 | 模式 | OEE | 人员效率 | 切换时间(分钟) | 缓冲区容量 |
-    |--------|----------|------|------|-----|----------|----------------|------------|
-    | 注油   | 25       | 2    | 并联 | 0.85| 0.95     | 45             | 100        |
-    
-    必填字段：工序名、耗时(秒)、人数
-    可选字段：模式（默认"并联"）、OEE（默认0.85）、人员效率（默认0.95）、切换时间（默认45）、缓冲区容量（默认100）
-    
-    Args:
-        file_path: Excel文件路径
-        
-    Returns:
-        Tuple[Optional[ProductionLine], Optional[str]]: 
-            - 第一个元素：导入的产线对象，如果导入失败返回None
-            - 第二个元素：错误消息，如果成功返回None
-            
-    示例：
-        line, error = import_from_excel("configs/产线配置.xlsx")
-        if line:
-            print(f"导入成功：{line.name}")
-        else:
-            print(f"导入失败：{error}")
-    """
+    """Import an Excel configuration transactionally; reject explicit invalid values."""
     try:
-        # 尝试导入pandas（如果安装了）
-        try:
-            import pandas as pd
-        except ImportError:
-            error_msg = "需要安装pandas和openpyxl库才能导入Excel\n请运行：pip install pandas openpyxl"
-            return None, error_msg
-        
-        # 检查文件是否存在
-        if not os.path.exists(file_path):
+        import pandas as pd
+        from src.models import CollaborationType
+
+        if not os.path.isfile(file_path):
             return None, f"文件不存在：{file_path}"
-        
-        # 读取Excel文件（支持.xlsx和.xls格式）
-        try:
-            df = pd.read_excel(file_path, engine='openpyxl')
-        except Exception as e:
-            return None, f"无法读取Excel文件：{str(e)}\n请确保文件格式正确（.xlsx或.xls）"
-        
-        # 检查是否为空文件
+        with pd.ExcelFile(file_path, engine='openpyxl') as book:
+            sheets = {name: pd.read_excel(book, sheet_name=name, keep_default_na=False) for name in book.sheet_names}
+        df = sheets.get('工序', next(iter(sheets.values())))
         if df.empty:
             return None, "Excel文件为空，没有数据行"
-        
-        # 列名映射（支持多种可能的列名）
         column_mapping = {
+            'id': ['工序ID', 'id'],
+            'machine_count': ['机台数量', '机台数', 'machine_count'],
             'name': ['工序名', '工序名称', '名称', 'name', 'Name', 'NAME'],
             'process_time': ['耗时(秒)', '耗时', '单颗耗时', 'process_time', 'Process Time', 'PROCESS_TIME', '时间', '秒'],
             'worker_count': ['人数', '工人数', '人员数', 'worker_count', 'Worker Count', 'WORKER_COUNT', '工人数量'],
@@ -307,359 +310,144 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
             'bom': ['BOM(组件:用量;...)', 'BOM', 'bom', 'BOM组件'],
         }
         
-        # 查找实际列名
         actual_columns = {}
-        for key, possible_names in column_mapping.items():
+        for key, names in column_mapping.items():
             for col in df.columns:
-                col_str = str(col).strip()
-                if col_str in possible_names:
-                    actual_columns[key] = col_str
+                if str(col).strip() in names:
+                    actual_columns[key] = col
                     break
-        
-        # 检查必填字段
-        required_fields = ['name', 'process_time', 'worker_count']
-        missing_fields = [field for field in required_fields if field not in actual_columns]
-        if missing_fields:
-            field_names = {
-                'name': '工序名',
-                'process_time': '耗时(秒)',
-                'worker_count': '人数'
-            }
-            missing_names = [field_names.get(f, f) for f in missing_fields]
-            return None, f"Excel文件缺少必填列：{', '.join(missing_names)}\n请参考模板格式"
-        
-        # 创建产线对象
+        missing = [name for name in ('name', 'process_time', 'worker_count')
+                   if name not in actual_columns]
+        if missing:
+            return None, "Excel文件缺少必填列：" + ', '.join(missing)
+
+        def blank(value):
+            return value is None or (isinstance(value, str) and not value.strip()) or bool(pd.isna(value))
+
+        def number(value, default, label, integer=False):
+            if blank(value):
+                value = default
+            if isinstance(value, bool):
+                raise ValueError(f"{label}必须是数字")
+            parsed = float(value)
+            if not math.isfinite(parsed) or (integer and int(parsed) != parsed):
+                raise ValueError(f"{label}必须是有限" + ("整数" if integer else "数值"))
+            return int(parsed) if integer else parsed
+
+        def pick(row, names, default):
+            for name in names:
+                if name in row and not blank(row[name]):
+                    return row[name]
+            return default
+
         line = ProductionLine(name="从Excel导入")
+        if '产线配置' in sheets:
+            for _, row in sheets['产线配置'].iterrows():
+                key, value = str(row.iloc[0]).strip(), row.iloc[1]
+                if blank(value):
+                    continue
+                if key == 'production_type':
+                    line.production_type = ProductionType(str(value).strip())
+                elif key in ('shift_hours', 'break_minutes', 'worker_hourly_wage',
+                             'cip_interval_batches', 'cip_interval_hours'):
+                    setattr(line, key, number(value, 0, key, key == 'cip_interval_batches'))
+                elif key == 'changeover_matrix_json':
+                    line.changeover_matrix = json.loads(str(value))
+                    if not isinstance(line.changeover_matrix, dict):
+                        raise ValueError("换型矩阵必须是JSON对象")
+        elif '生产类型' in sheets:
+            type_df = pd.read_excel(file_path, sheet_name='生产类型', header=None)
+            line.production_type = ProductionType(str(type_df.iloc[0, 1]).strip())
 
-        # V1.3：读取生产类型
-        try:
-            pt_value = ""
-            try:
-                cfg_df = pd.read_excel(
-                    file_path, sheet_name='产线配置', engine='openpyxl'
-                )
-                for _, row in cfg_df.iterrows():
-                    if str(row.iloc[0]).strip() == 'production_type':
-                        pt_value = str(row.iloc[1]).strip().lower()
-                        break
-            except Exception:
-                pass
-            if not pt_value:
-                pt_df = pd.read_excel(
-                    file_path, sheet_name='生产类型', header=None,
-                    engine='openpyxl',
-                )
-                pt_value = str(pt_df.iloc[0, 1]).strip().lower()
-            if pt_value in ('assembly', 'liquid_filling', 'pouch_packaging'):
-                line.production_type = ProductionType(pt_value)
-        except Exception:
-            pass
-
-        # V3.3.1：读取产线级配置（班次/CIP/换型矩阵）
-        try:
-            config_df = pd.read_excel(file_path, sheet_name='产线配置', engine='openpyxl')
-            config_map = {}
-            for _, row in config_df.iterrows():
-                key = str(row.iloc[0]).strip()
-                config_map[key] = row.iloc[1]
-            if config_map.get('shift_hours') not in (None, ''):
-                line.shift_hours = int(float(config_map['shift_hours']))
-            if config_map.get('break_minutes') not in (None, ''):
-                line.break_minutes = int(float(config_map['break_minutes']))
-            if config_map.get('worker_hourly_wage') not in (None, ''):
-                line.worker_hourly_wage = float(config_map['worker_hourly_wage'])
-            if config_map.get('cip_interval_batches') not in (None, ''):
-                line.cip_interval_batches = int(float(config_map['cip_interval_batches']))
-            if config_map.get('cip_interval_hours') not in (None, ''):
-                line.cip_interval_hours = float(config_map['cip_interval_hours'])
-            matrix_text = str(config_map.get('changeover_matrix_json') or '').strip()
-            if matrix_text:
-                matrix = json.loads(matrix_text)
-                if isinstance(matrix, dict):
-                    line.changeover_matrix = matrix
-        except Exception:
-            pass
-
-        # V3.3.1：读取原料与到货计划
-        try:
-            material_df = pd.read_excel(file_path, sheet_name='原料', engine='openpyxl')
-            for _, row in material_df.iterrows():
-                material = Material(
-                    name=str(row['原料名']).strip(),
-                    unit=str(row.get('单位', 'kg')).strip(),
-                    initial_stock=float(row.get('初始库存', 0)),
-                    unit_cost=float(row.get('单价', 0) or 0),
-                )
-                line.materials.append(material)
-                line.inventory[material.name] = material.initial_stock
-        except Exception:
-            pass
-
-        try:
-            arrival_df = pd.read_excel(
-                file_path, sheet_name='到货计划', engine='openpyxl'
+        for _, row in sheets.get('原料', pd.DataFrame()).iterrows():
+            material = Material(
+                name=str(row['原料名']).strip(), unit=str(pick(row, ['单位'], 'kg')),
+                initial_stock=number(row.get('初始库存'), 0, '初始库存'),
+                unit_cost=number(row.get('单价'), 0, '原料单价'),
             )
-            for _, row in arrival_df.iterrows():
-                line.material_arrivals.append(MaterialArrival(
-                    time_minutes=float(row['到货时间(分钟)']),
-                    material=str(row['原料']).strip(),
-                    quantity=float(row['数量']),
-                ))
-        except Exception:
-            pass
-
-        # V1.3：读取配方/罐/批次
-        try:
-            recipe_df = pd.read_excel(file_path, sheet_name='配方', engine='openpyxl')
-            for _, row in recipe_df.iterrows():
-                line.recipes.append(Recipe(
-                    name=str(row['配方名']).strip(),
-                    batch_volume_l=float(row.get('批次量L', 100)),
-                    yield_rate=float(row.get('收率', 0.95)),
-                    nicotine_concentration=float(row.get('尼古丁浓度', 0)),
-                    flavor=str(row.get('口味', '')),
-                    mixing_time_min=float(row.get('调配min', 60)),
-                    aging_time_min=float(row.get('陈化min', 120)),
-                    filling_rate_l_per_h=float(row.get('灌装速率L/h', 500)),
-                    qc_time_min=float(row.get('QCmin', 30)),
-                    clean_time_min=float(row.get('清洗min', 45)),
-                ))
-        except Exception:
-            pass
-
-        try:
-            tank_df = pd.read_excel(file_path, sheet_name='罐', engine='openpyxl')
-            for _, row in tank_df.iterrows():
-                line.tanks.append(Tank(
-                    id=str(row['罐ID']).strip(),
-                    name=str(row['罐名']).strip(),
-                    capacity_l=float(row.get('容量L', 1000)),
-                    current_level_l=float(row.get('当前液位L', 0)),
-                ))
-        except Exception:
-            pass
-
-        try:
-            batch_df = pd.read_excel(file_path, sheet_name='批次', engine='openpyxl')
-            for _, row in batch_df.iterrows():
-                line.batches.append(Batch(
-                    id=str(row['批次ID']).strip(),
-                    recipe_name=str(row['配方名']).strip(),
-                    quantity_l=float(row.get('批次量L', 100)),
-                ))
-        except Exception:
-            pass
-        
-        # 错误收集列表
-        errors = []
-        
-        # 遍历每一行，创建工序
+            line.materials.append(material)
+            line.inventory[material.name] = material.initial_stock
+        for _, row in sheets.get('到货计划', pd.DataFrame()).iterrows():
+            line.material_arrivals.append(MaterialArrival(
+                time_minutes=number(row['到货时间(分钟)'], 0, '到货时间'),
+                material=str(row['原料']).strip(), quantity=number(row['数量'], 0, '到货数量'),
+            ))
+        for _, row in sheets.get('配方', pd.DataFrame()).iterrows():
+            recipe = Recipe(
+                name=str(row['配方名']).strip(),
+                batch_volume_l=number(pick(row, ['批次量kg', '批次量L'], 100), 100, '配方批量'),
+                yield_rate=number(row.get('收率'), .95, '收率'),
+                nicotine_concentration=number(row.get('尼古丁浓度'), 0, '尼古丁浓度'),
+                flavor=str(pick(row, ['口味'], '')),
+                mixing_time_min=number(row.get('调配min'), 60, '调配时间'),
+                aging_time_min=number(row.get('陈化min'), 120, '陈化时间'),
+                filling_rate_l_per_h=number(pick(row, ['灌装速率kg/h', '灌装速率L/h'], 500), 500, '灌装速率'),
+                qc_time_min=number(row.get('QCmin'), 30, 'QC时间'),
+                clean_time_min=number(row.get('清洗min'), 45, '清洗时间'),
+            )
+            if '投料JSON' in row and not blank(row['投料JSON']):
+                recipe.ingredients = json.loads(str(row['投料JSON']))
+            line.recipes.append(recipe)
+        for _, row in sheets.get('罐', pd.DataFrame()).iterrows():
+            line.tanks.append(Tank(
+                id=str(row['罐ID']).strip(), name=str(row['罐名']).strip(),
+                capacity_l=number(pick(row, ['容量kg', '容量L'], 1000), 1000, '罐容量'),
+                current_level_l=number(pick(row, ['当前液位kg', '当前液位L'], 0), 0, '罐内数量'),
+            ))
+        for _, row in sheets.get('批次', pd.DataFrame()).iterrows():
+            line.batches.append(Batch(
+                id=str(row['批次ID']).strip(), recipe_name=str(row['配方名']).strip(),
+                quantity_l=number(pick(row, ['批次量kg', '批次量L'], 100), 100, '批次量'),
+            ))
+        role_map = {
+            '调香师': JobRole.MIXER, '调配工': JobRole.MIXER,
+            '灌装操作员': JobRole.FILLING_OPERATOR, 'qc化验员': JobRole.QC_TECHNICIAN,
+            'qc 化验员': JobRole.QC_TECHNICIAN, '化验员': JobRole.QC_TECHNICIAN,
+            '包装机手': JobRole.PACKAGING_OPERATOR, '清洗工': JobRole.CLEANER,
+            '通用装配工': JobRole.GENERAL, '通用': JobRole.GENERAL,
+        }
         for idx, row in df.iterrows():
+            def field(key, default=None):
+                return pick(row, [actual_columns[key]], default) if key in actual_columns else default
             try:
-                # 获取必填字段
-                name = str(row[actual_columns['name']]).strip()
-                if not name or name == 'nan' or name.lower() == 'nan':
-                    errors.append(f"第{idx+2}行：工序名不能为空")
-                    continue
-                
-                # 获取耗时（秒）
-                try:
-                    process_time = float(row[actual_columns['process_time']])
-                    if process_time <= 0:
-                        errors.append(f"第{idx+2}行（{name}）：耗时必须大于0")
-                        continue
-                except (ValueError, TypeError):
-                    errors.append(f"第{idx+2}行（{name}）：耗时格式错误，必须是数字")
-                    continue
-                
-                # 获取人数
-                try:
-                    worker_count = int(float(row[actual_columns['worker_count']]))
-                    if worker_count < 1:
-                        errors.append(f"第{idx+2}行（{name}）：人数至少为1")
-                        continue
-                except (ValueError, TypeError):
-                    errors.append(f"第{idx+2}行（{name}）：人数格式错误，必须是整数")
-                    continue
-                
-                # 获取可选字段（使用默认值）
-                collaboration_type_str = 'parallel'  # 默认并联
-                if 'collaboration_type' in actual_columns:
-                    col_val = str(row[actual_columns['collaboration_type']]).strip().lower()
-                    if col_val in ['并联', 'parallel', 'parallel']:
-                        collaboration_type_str = 'parallel'
-                    elif col_val in ['协同', 'collaborative', 'collaborative']:
-                        collaboration_type_str = 'collaborative'
-                
-                oee = 0.85  # 默认OEE
-                if 'oee' in actual_columns:
-                    try:
-                        oee_val = float(row[actual_columns['oee']])
-                        if 0 < oee_val <= 1:
-                            oee = oee_val
-                    except (ValueError, TypeError):
-                        pass  # 使用默认值
-                
-                efficiency = 0.95  # 默认人员效率
-                if 'efficiency' in actual_columns:
-                    try:
-                        eff_val = float(row[actual_columns['efficiency']])
-                        if 0 < eff_val <= 1:
-                            efficiency = eff_val
-                    except (ValueError, TypeError):
-                        pass  # 使用默认值
-                
-                changeover_time = 45  # 默认切换时间（分钟）
-                if 'changeover_time' in actual_columns:
-                    try:
-                        changeover_val = int(float(row[actual_columns['changeover_time']]))
-                        if changeover_val >= 0:
-                            changeover_time = changeover_val
-                    except (ValueError, TypeError):
-                        pass  # 使用默认值
-                
-                buffer_capacity = 100  # 默认缓冲区容量
-                if 'buffer_capacity' in actual_columns:
-                    try:
-                        buffer_val = int(float(row[actual_columns['buffer_capacity']]))
-                        if buffer_val > 0:
-                            buffer_capacity = buffer_val
-                    except (ValueError, TypeError):
-                        pass  # 使用默认值
-
-                # V3.3.1：读取 V1.3+/V3.2 可选字段
-                machine_takt = None
-                if 'machine_takt' in actual_columns:
-                    text = str(row[actual_columns['machine_takt']]).strip()
-                    if text and text.lower() != 'nan':
-                        machine_takt = float(text)
-
-                clean_time_minutes = 0.0
-                if 'clean_time_minutes' in actual_columns:
-                    clean_time_minutes = float(
-                        row[actual_columns['clean_time_minutes']] or 0
-                    )
-
-                sampling_rate = 0.0
-                if 'sampling_rate' in actual_columns:
-                    sampling_rate = float(
-                        row[actual_columns['sampling_rate']] or 0
-                    )
-
-                defect_rate = 0.0
-                if 'defect_rate' in actual_columns:
-                    defect_rate = float(row[actual_columns['defect_rate']] or 0)
-
-                rework_minutes = 0.0
-                if 'rework_minutes' in actual_columns:
-                    rework_minutes = float(
-                        row[actual_columns['rework_minutes']] or 0
-                    )
-
-                job_role = JobRole.GENERAL
-                if 'job_role' in actual_columns:
-                    role_text = str(
-                        row[actual_columns['job_role']]
-                    ).strip()
-                    role_map = {
-                        '调香师': JobRole.MIXER,
-                        '调配工': JobRole.MIXER,
-                        '灌装操作员': JobRole.FILLING_OPERATOR,
-                        'qc化验员': JobRole.QC_TECHNICIAN,
-                        'qc 化验员': JobRole.QC_TECHNICIAN,
-                        '化验员': JobRole.QC_TECHNICIAN,
-                        '包装机手': JobRole.PACKAGING_OPERATOR,
-                        '清洗工': JobRole.CLEANER,
-                        '通用装配工': JobRole.GENERAL,
-                        '通用': JobRole.GENERAL,
-                    }
-                    job_role = role_map.get(role_text.lower(), JobRole.GENERAL)
-
-                cleanroom_zone = ""
-                if 'cleanroom_zone' in actual_columns:
-                    cleanroom_zone = str(
-                        row[actual_columns['cleanroom_zone']]
-                    ).strip()
-
+                mode = str(field('collaboration_type', 'parallel')).strip().lower()
+                mode = {'并联': 'parallel', '协同': 'collaborative'}.get(mode, mode)
+                role_text = str(field('job_role', 'general')).strip().lower()
+                role = role_map[role_text] if role_text in role_map else JobRole(role_text)
+                workers = number(field('worker_count'), 1, '人数', True)
+                takt = field('machine_takt')
+                kwargs = {}
+                for key, default, integer in (
+                    ('oee', .85, False), ('efficiency', .95, False),
+                    ('changeover_time', 45, False), ('buffer_capacity', 100, True),
+                    ('clean_time_minutes', 0, False), ('sampling_rate', 0, False),
+                    ('defect_rate', 0, False), ('rework_minutes', 0, False),
+                ):
+                    kwargs[key] = number(field(key), default, key, integer)
+                if 'machine_count' in actual_columns:
+                    kwargs['machine_count'] = number(field('machine_count'), 1, '机台数', True)
+                elif takt is not None:
+                    kwargs['machine_count'] = workers  # Legacy sheets used people as machine count.
                 bom = {}
-                if 'bom' in actual_columns:
-                    bom_text = str(row[actual_columns['bom']]).strip()
-                    if bom_text and bom_text.lower() != 'nan':
-                        for part in bom_text.split(';'):
-                            if ':' not in part:
-                                continue
-                            component, amount = part.split(':', 1)
-                            try:
-                                bom[component.strip()] = float(amount)
-                            except ValueError:
-                                pass
-                
-                # 创建工序对象
-                # 导入CollaborationType（延迟导入避免循环依赖）
-                try:
-                    from src.models import CollaborationType
-                except ImportError:
-                    from models import CollaborationType
-                collaboration_type = CollaborationType.PARALLEL if collaboration_type_str == 'parallel' else CollaborationType.COLLABORATIVE
-                
-                station = Station(
-                    id=f"s{idx+1:02d}",
-                    name=name,
-                    process_time=process_time,
-                    worker_count=worker_count,
-                    collaboration_type=collaboration_type,
-                    oee=oee,
-                    efficiency=efficiency,
-                    changeover_time=changeover_time,
-                    buffer_capacity=buffer_capacity,
-                    machine_takt=machine_takt,
-                    clean_time_minutes=clean_time_minutes,
-                    sampling_rate=sampling_rate,
-                    defect_rate=defect_rate,
-                    rework_minutes=rework_minutes,
-                    job_role=job_role,
-                    cleanroom_zone=cleanroom_zone,
-                    bom=bom,
-                )
-                
-                # 校验工序参数
-                valid, error_msg = validate_station(name, process_time, worker_count)
-                if not valid:
-                    errors.append(f"第{idx+2}行（{name}）：{error_msg}")
-                    continue
-                
-                line.add_station(station)
-                
-            except Exception as e:
-                errors.append(f"第{idx+2}行：处理失败 - {str(e)}")
-                continue
-        
-        # 检查是否成功创建了至少一个工序
-        if not line.stations:
-            error_msg = "未能成功导入任何工序。\n"
-            if errors:
-                error_msg += "\n错误详情：\n" + "\n".join(errors[:10])  # 最多显示10个错误
-                if len(errors) > 10:
-                    error_msg += f"\n... 还有{len(errors)-10}个错误"
-            return None, error_msg
-        
-        # 如果有部分错误，但仍然成功导入了部分数据，给出警告
-        warning_msg = None
-        if errors:
-            warning_msg = f"成功导入{len(line.stations)}个工序，但有{len(errors)}行数据有错误：\n" + "\n".join(errors[:5])
-            if len(errors) > 5:
-                warning_msg += f"\n... 还有{len(errors)-5}个错误"
-        
-        # 校验整个产线配置
-        valid, error_msg = validate_production_line(line)
-        if not valid:
-            return None, f"导入的产线配置不合法：{error_msg}"
-        
-        # 返回结果（如果有警告，会在GUI中显示）
-        return line, warning_msg
-        
-    except Exception as e:
-        return None, f"导入Excel失败：{str(e)}"
+                for part in str(field('bom', '')).split(';'):
+                    if not part.strip():
+                        continue
+                    component, amount = part.split(':', 1)
+                    bom[component.strip()] = number(amount, 0, 'BOM用量')
+                line.add_station(Station(
+                    id=str(field('id', f"s{idx+1:02d}")).strip(),
+                    name=str(field('name', '')).strip(),
+                    process_time=number(field('process_time'), 0, '耗时'), worker_count=workers,
+                    collaboration_type=CollaborationType(mode), job_role=role,
+                    machine_takt=number(takt, 1, '机台节拍') if takt is not None else None,
+                    cleanroom_zone=str(field('cleanroom_zone', '')), bom=bom, **kwargs,
+                ))
+            except (ValueError, TypeError, KeyError) as exc:
+                return None, f"第{idx+2}行参数错误：{exc}"
+        valid, error = validate_production_line(line)
+        return (line, None) if valid else (None, f"导入的产线配置不合法：{error}")
+    except Exception as exc:
+        return None, f"导入Excel失败：{exc}"
 
 
 def create_excel_template(file_path: str, production_type: str = "assembly") -> bool:
@@ -707,12 +495,12 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
         ]
 
         df = pd.DataFrame(
-            template_data,
+            [row + [1] for row in template_data],
             columns=[
                 '工序名', '耗时(秒)', '人数', '模式', 'OEE', '人员效率',
                 '切换时间(分钟)', '缓冲区容量', '机台节拍(秒)', '清洗时间(分钟)',
                 '抽检比例', '缺陷率', '返工时长(分钟)', '工种', '洁净区',
-                'BOM(组件:用量;...)',
+                'BOM(组件:用量;...)', '机台数量',
             ],
         )
 
@@ -737,20 +525,20 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
                 recipe_df = pd.DataFrame([
                     ['经典烟草', 500, 0.95, 20.0, '经典', 60, 240, 800, 30, 60],
                 ], columns=[
-                    '配方名', '批次量L', '收率', '尼古丁浓度', '口味',
-                    '调配min', '陈化min', '灌装速率L/h', 'QCmin', '清洗min',
+                    '配方名', '批次量kg', '收率', '尼古丁浓度', '口味',
+                    '调配min', '陈化min', '灌装速率kg/h', 'QCmin', '清洗min',
                 ])
                 recipe_df.to_excel(writer, sheet_name='配方', index=False)
 
                 tank_df = pd.DataFrame([
                     ['T01', '调配罐', 2000, 0],
                     ['T02', '成品罐', 3000, 0],
-                ], columns=['罐ID', '罐名', '容量L', '当前液位L'])
+                ], columns=['罐ID', '罐名', '容量kg', '当前液位kg'])
                 tank_df.to_excel(writer, sheet_name='罐', index=False)
 
                 batch_df = pd.DataFrame([
                     ['B001', '经典烟草', 500, 'queued'],
-                ], columns=['批次ID', '配方名', '批次量L', '状态'])
+                ], columns=['批次ID', '配方名', '批次量kg', '状态'])
                 batch_df.to_excel(writer, sheet_name='批次', index=False)
 
             # 原料与到货计划（V3.3.1，组装 BOM/烟油投料通用）
@@ -773,94 +561,121 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
 
 # ==================== 参数校验 ====================
 
+def _finite_number(value: Any) -> bool:
+    """Accept finite numeric model values, excluding bool and numeric strings."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def validate_station(name: str, process_time: float, worker_count: int) -> Tuple[bool, str]:
-    """
-    校验工序参数
-    
-    检查用户输入的工序参数是否合法
-    
-    Args:
-        name: 工序名称
-        process_time: 单颗耗时（秒）
-        worker_count: 工人数量
-        
-    Returns:
-        Tuple[bool, str]: (是否合法, 错误消息)
-        
-    示例：
-        valid, error = validate_station("注油", 25, 2)
-        if not valid:
-            print(f"验证失败：{error}")
-    """
-    # 校验名称
-    if not name or not name.strip():
+    """Validate the common station input boundary without truncating numbers."""
+    if not isinstance(name, str) or not name.strip():
         return False, "工序名称不能为空"
-    
     if len(name) > 20:
         return False, "工序名称不能超过20个字符"
-    
-    # 校验耗时
-    if process_time <= 0:
-        return False, "单件耗时必须大于0"
-    
-    if process_time > 3600:
-        return False, "单件耗时不能超过3600秒（1小时）"
-    
-    # 校验人数
-    if worker_count < 1:
-        return False, "工人数量至少为1"
-    
-    if worker_count > 20:
-        return False, "工人数量不能超过20（单工序）"
-    
-    # 所有检查通过
+    if not _finite_number(process_time) or not 0 < process_time <= 3600:
+        return False, "单件耗时必须为大于0且不超过3600秒的有限数"
+    if (not _finite_number(worker_count) or int(worker_count) != worker_count
+            or not 1 <= worker_count <= 20):
+        return False, "工人数量必须为1到20之间的整数"
     return True, ""
 
 
-def validate_production_line(line: ProductionLine) -> Tuple[bool, str]:
-    """
-    校验产线配置
-    
-    检查产线配置是否完整和合法
-    
-    Args:
-        line: 产线对象
-        
-    Returns:
-        Tuple[bool, str]: (是否合法, 错误消息)
-    """
-    # 检查是否有工序
-    if not line.stations:
-        return False, "产线至少需要一个工序"
-    
-    # 检查工序数量
-    if len(line.stations) > 20:
-        return False, "产线工序数量不能超过20个"
-    
-    # 检查每个工序
-    station_ids = set()
-    for station in line.stations:
-        # 检查ID是否重复
-        if station.id in station_ids:
-            return False, f"工序ID重复：{station.id}"
-        station_ids.add(station.id)
-        
-        # 校验工序参数
-        valid, error = validate_station(
-            station.name,
-            station.process_time,
-            station.worker_count
-        )
-        if not valid:
-            return False, f"工序'{station.name}'参数错误：{error}"
+def validate_production_line(
+    line: ProductionLine, allow_empty: bool = False,
+) -> Tuple[bool, str]:
+    """Validate finite values, dimensions and references before importing or running."""
+    def bounded(value, label, low=0, high=float('inf'), integer=False, positive=False):
+        if (not _finite_number(value) or value < low or value > high
+                or (positive and value == 0) or (integer and int(value) != value)):
+            raise ValueError(f"{label}必须是合法范围内的有限" + ("整数" if integer else "数值"))
 
-    # V1.3：非组装类型校验人力模型（工种/技能矩阵/洁净区上限）
-    if line.production_type != ProductionType.ASSEMBLY:
+    try:
+        if not line.stations and not allow_empty:
+            return False, "产线至少需要一个工序"
+        if len(line.stations) > 20:
+            return False, "产线工序数量不能超过20个"
+        bounded(line.shift_hours, "班次时长", high=24, positive=True)
+        bounded(line.worker_hourly_wage, "工人时薪", positive=True)
+        bounded(line.break_minutes, "休息时间")
+        if line.break_minutes >= line.shift_hours * 60:
+            return False, "休息时间必须小于班次时长"
+        if not isinstance(line.production_type, ProductionType):
+            return False, "未知生产类型"
+        ids = set()
+        for station in line.stations:
+            if not isinstance(station.id, str) or not station.id.strip() or station.id in ids:
+                return False, f"工序ID为空或重复：{station.id}"
+            ids.add(station.id)
+            valid, error = validate_station(station.name, station.process_time, station.worker_count)
+            if not valid:
+                return False, f"工序'{station.name}'参数错误：{error}"
+            for key in ('oee', 'efficiency', 'sampling_rate', 'defect_rate'):
+                bounded(getattr(station, key), f"工序{station.name}的{key}", high=1)
+            for key in ('changeover_time', 'clean_time_minutes', 'rework_minutes'):
+                bounded(getattr(station, key), f"工序{station.name}的{key}")
+            for key in ('buffer_capacity', 'machine_count'):
+                bounded(getattr(station, key, 1), f"工序{station.name}的{key}",
+                        integer=True, positive=True)
+            if station.machine_takt is not None:
+                bounded(station.machine_takt, f"工序{station.name}的机台节拍", positive=True)
+            if not isinstance(station.job_role, JobRole):
+                return False, f"工序{station.name}工种无效"
+            for component, amount in station.bom.items():
+                if not component:
+                    return False, "BOM组件名不能为空"
+                bounded(amount, f"工序{station.name}的BOM用量", positive=True)
+        for mapping, label, integer in (
+            (line.inventory, '库存', False), (line.labor_config, '岗位人数', True),
+            (line.cleanroom_limits, '洁净区人数上限', True),
+        ):
+            for name, value in mapping.items():
+                if not isinstance(name, str) or not name.strip():
+                    return False, f"{label}名称不能为空"
+                bounded(value, label, integer=integer)
+        bounded(line.cip_interval_batches, "周期CIP批次数", integer=True)
+        bounded(line.cip_interval_hours, "周期CIP小时数")
+        for transitions in line.changeover_matrix.values():
+            if not isinstance(transitions, dict):
+                return False, "换型矩阵必须为嵌套对象"
+            for value in transitions.values():
+                bounded(value, "换型矩阵时间")
+        for collection, label, identifier in (
+            (line.recipes, '配方', 'name'), (line.batches, '批次', 'id'),
+            (line.tanks, '罐', 'id'), (line.materials, '原料', 'name'),
+        ):
+            identifiers = [getattr(item, identifier) for item in collection]
+            if (any(not isinstance(i, str) or not i.strip() for i in identifiers)
+                    or len(set(identifiers)) != len(identifiers)):
+                return False, f"{label}名称或ID为空/重复"
+        recipes = {r.name for r in line.recipes}
+        for recipe in line.recipes:
+            for key in ('batch_volume_l', 'filling_rate_l_per_h'):
+                bounded(getattr(recipe, key), f"配方{recipe.name}的{key}", positive=True)
+            bounded(recipe.yield_rate, f"配方{recipe.name}收率", high=1)
+            for key in ('mixing_time_min', 'aging_time_min', 'qc_time_min', 'clean_time_min'):
+                bounded(getattr(recipe, key), f"配方{recipe.name}的{key}")
+            for value in recipe.ingredients.values():
+                bounded(value, f"配方{recipe.name}的投料用量")
+        for batch in line.batches:
+            if batch.recipe_name not in recipes:
+                return False, f"批次{batch.id}引用不存在的配方"
+            bounded(batch.quantity_l, f"批次{batch.id}批量", positive=True)
+        for tank in line.tanks:
+            bounded(tank.capacity_l, f"罐{tank.id}容量", positive=True)
+            bounded(tank.current_level_l, f"罐{tank.id}液位", high=tank.capacity_l)
+        for material in line.materials:
+            bounded(material.initial_stock, f"原料{material.name}库存")
+            bounded(material.unit_cost, f"原料{material.name}单价")
+        for arrival in line.material_arrivals:
+            if not isinstance(arrival.material, str) or not arrival.material.strip():
+                return False, "到货原料名不能为空"
+            bounded(arrival.time_minutes, "到货时间")
+            bounded(arrival.quantity, "到货数量")
         labor_ok, labor_msg = line.validate_labor()
         if not labor_ok:
             return False, labor_msg
-    
-    # 所有检查通过
+    except (ValueError, TypeError, AttributeError) as exc:
+        return False, str(exc)
     return True, ""
 
 
@@ -1027,15 +842,11 @@ DEFAULT_CONFIG_DIR = "configs"
 DEFAULT_CONFIG_FILE = os.path.join(DEFAULT_CONFIG_DIR, "default.json")
 
 # 日志文件路径
-LOG_DIR = "logs"
+LOG_DIR = os.path.join(get_app_data_dir(), "logs")
 LOG_FILE = os.path.join(LOG_DIR, "app.log")
 
 # UI 配置（V3.0：主题等）
-UI_CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    'configs',
-    'ui_config.json',
-)
+UI_CONFIG_FILE = get_user_data_path('ui_config.json')
 
 # GUI配置
 CANVAS_WIDTH = 1200  # 画布宽度（像素）

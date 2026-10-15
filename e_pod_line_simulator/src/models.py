@@ -19,6 +19,9 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from datetime import datetime
 import copy
+import hashlib
+import json
+import math
 
 
 class CollaborationType(Enum):
@@ -160,87 +163,34 @@ class Station:
     current_status: str = "idle"  # 当前状态：idle(空闲)、running(运行)、blocked(堵塞)、waiting(等待)
     wip_count: int = 0  # 当前WIP数量，等待在该工序前加工的物料数
     total_output: int = 0  # 累计产出，该工序已完成的物料总数
+
+    # V3.4：设备台数与操作员人数分离；放在末尾以保留旧位置参数兼容性。
+    machine_count: int = 1
     
     def get_capacity(self) -> float:
-        """
-        计算工序的实际产能（颗/小时）
-        
-        产能计算公式：
-        1. 理论产能 = 3600秒 / 单颗耗时（秒）
-        2. 根据协作模式调整：
-           - 并联模式：理论产能 × 工人数（多人同时工作，产能叠加）
-           - 协同模式：理论产能（多人协作，但产能不叠加）
-        3. 应用效率系数：调整后产能 × OEE × 人员效率
-        4. 考虑切换时间影响：实际产能 = 产能 × (1 - 切换时间占比)
-        
-        为什么这样计算？
-        - 并联模式：3个人同时工作，相当于3条并行产线，产能×3
-        - 协同模式：3个人协作，但一次只能做一个，产能不变（但可能更快）
-        - OEE和efficiency：考虑设备故障、人员疲劳等实际因素
-        - 切换时间：考虑产品型号更换导致的停机时间
-        
-        Returns:
-            float: 实际产能，单位：颗/小时
-            
-        示例：
-            station = Station("s01", "注油", 25, worker_count=2)
-            # 理论产能 = 3600/25 = 144颗/h
-            # 并联调整 = 144 × 2 = 288颗/h
-            # 效率调整 = 288 × 0.85 × 0.95 ≈ 232.56颗/h
-            # 切换时间影响：假设每天切换一次，每次45分钟，占比 = 45/(8×60) = 0.09375
-            # 最终产能 = 232.56 × (1 - 0.09375) ≈ 211.35颗/h
-        """
-        # 步骤1：计算理论产能（不考虑人数和效率）
-        # 3600秒 = 1小时，除以单颗耗时得到理论产能
-        # 机台节拍模式（尼古丁袋）：按"机台节拍 × 机台数"计算
-        if self.machine_takt and self.machine_takt > 0:
-            theoretical_capacity = 3600.0 / self.machine_takt
-            adjusted_capacity = theoretical_capacity * self.worker_count
-            # 应用效率系数
-            efficiency_adjusted_capacity = adjusted_capacity * self.oee * self.efficiency
-            # 切换/清洗时间占比
-            shift_hours = 8.0
-            total_shift_minutes = shift_hours * 60
-            downtime = (self.changeover_time or 0) + (self.clean_time_minutes or 0)
-            ratio = min(downtime / total_shift_minutes, 1.0) if total_shift_minutes > 0 else 0.0
-            return efficiency_adjusted_capacity * (1 - ratio)
+        """生产时间内的能力（单位/小时），不按固定班长摊销停机。
 
-        theoretical_capacity = 3600.0 / self.process_time
-        
-        # 步骤2：根据协作模式调整产能
-        if self.collaboration_type == CollaborationType.PARALLEL:
-            # 并联模式：多人同时工作，产能直接乘以人数
-            # 例如：2人并联，每人144颗/h，总产能 = 144 × 2 = 288颗/h
-            adjusted_capacity = theoretical_capacity * self.worker_count
-        else:
-            # 协同模式：多人协作，但产能不叠加
-            # 虽然可能因为协作提高速度，但这里简化处理，产能不变
-            adjusted_capacity = theoretical_capacity
-        
-        # 步骤3：应用效率系数
-        # OEE：设备效率，考虑设备故障、维护等
-        # efficiency：人员效率，考虑技能、疲劳等
-        # 两者相乘得到初步实际产能
-        efficiency_adjusted_capacity = adjusted_capacity * self.oee * self.efficiency
-        
-        # 步骤4：考虑切换时间影响
-        # 假设每天切换一次，切换时间（分钟）转换为小时
-        # 计算切换时间占比：切换时间 / (班次时长 × 60)
-        # 默认班次时长为8小时
-        shift_hours = 8.0
-        total_shift_minutes = shift_hours * 60
-        if total_shift_minutes > 0:
-            # 切换时间占比 = 切换时间 / 总班次时间
-            changeover_ratio = self.changeover_time / total_shift_minutes
-            # 确保占比不超过100%
-            changeover_ratio = min(changeover_ratio, 1.0)
-        else:
-            changeover_ratio = 0.0
-        
-        # 最终产能 = 效率调整后产能 × (1 - 切换时间占比)
-        actual_capacity = efficiency_adjusted_capacity * (1 - changeover_ratio)
-        
-        return actual_capacity
+        机台模式由 ``machine_count`` 决定并发能力；``worker_count`` 只表示人。
+        计划休息、换型和清洗由产线日历另行扣除，避免重复折减。
+        """
+        takt = self.machine_takt if self.machine_takt is not None else self.process_time
+        if not math.isfinite(takt) or takt <= 0:
+            raise ValueError("工序节拍必须为有限正数")
+        return 3600.0 / takt * self.processing_units() * self.oee * self.efficiency
+
+    def processing_units(self) -> int:
+        """可独立处理物料的资源数；协同人工工序始终为一个团队。"""
+        units = self.machine_count if self.machine_takt is not None else (
+            self.worker_count if self.collaboration_type == CollaborationType.PARALLEL else 1
+        )
+        if (isinstance(units, bool) or not isinstance(units, (int, float))
+                or not math.isfinite(units) or units <= 0 or int(units) != units):
+            raise ValueError("工人/机台数量必须为正整数")
+        return int(units)
+
+    def planned_downtime_minutes(self) -> float:
+        """每个配置班次的计划换型与清洗时长；不含产线休息。"""
+        return float(self.changeover_time) + float(self.clean_time_minutes)
     
     def get_utilization(self, bottleneck_capacity: float) -> float:
         """
@@ -302,8 +252,12 @@ class Station:
         Returns:
             Station: 新创建的工序对象
         """
-        # 将字符串转换回枚举类型
-        if isinstance(data['collaboration_type'], str):
+        data = copy.deepcopy(data)
+        # 旧版本把工人数同时解释为台数。迁移时保留两者历史取值；新建默认一台。
+        if data.get('machine_takt') is not None and 'machine_count' not in data:
+            data['machine_count'] = data.get('worker_count', 1)
+        # 将字符串转换回枚举类型，不修改调用方的原始字典。
+        if isinstance(data.get('collaboration_type'), str):
             data['collaboration_type'] = CollaborationType(data['collaboration_type'])
         if isinstance(data.get('job_role'), str):
             data['job_role'] = JobRole(data['job_role'])
@@ -453,8 +407,10 @@ class ProductionLine:
             line.add_station(Station("s02", "焊接", 30, 3))  # 产能约306颗/h
             bottleneck = line.find_bottleneck()  # 返回"注油"工序
         """
+        if self.production_type == ProductionType.LIQUID_FILLING:
+            # 烟油由配方批次驱动，不以支持岗位的单件节拍判断瓶颈。
+            return None
         if not self.stations:
-            # 如果产线没有工序，返回None
             return None
         
         # 计算各工序的产能
@@ -515,46 +471,85 @@ class ProductionLine:
         return bottleneck_scores[0][1]
     
     def get_bottleneck_capacity(self) -> float:
-        """
-        获取瓶颈产能（产线的最大产能）
-        
-        瓶颈产能 = 瓶颈工序的产能
-        这是整条产线理论上能达到的最大产出速度
-        
-        Returns:
-            float: 瓶颈产能（颗/小时），如果产线为空返回0
-        """
-        bottleneck = self.find_bottleneck()
-        if bottleneck is None:
-            return 0.0
-        return bottleneck.get_capacity()
-    
+        """生产时间内的理论上限；烟油按配方批次周期，不从人工工序推导。"""
+        if self.production_type == ProductionType.LIQUID_FILLING:
+            if not self.recipes:
+                return 0.0
+            recipe = self.recipes[0]
+            quantity = recipe.batch_volume_l
+            cycle = (recipe.mixing_time_min + recipe.aging_time_min + recipe.qc_time_min) / 60
+            cycle += quantity / recipe.filling_rate_l_per_h
+            return quantity * recipe.yield_rate / cycle if cycle > 0 else 0.0
+        return min((station.get_capacity() for station in self.stations), default=0.0)
+
+    def effective_hours(self, station: Optional[Station] = None) -> float:
+        """每班生产窗口：先生产，休息及该站计划换型/清洗统一安排在班尾。"""
+        downtime = station.planned_downtime_minutes() if station is not None else 0.0
+        return max(0.0, self.shift_hours - (self.break_minutes + downtime) / 60.0)
+
     def calculate_daily_output(self) -> float:
-        """
-        计算预计日产量（颗/天）
-        
-        计算公式：
-        日产量 = 瓶颈产能 × 有效工作时间
-        
-        有效工作时间 = 班次时长 - 休息时间
-        
-        注意：由于get_capacity方法已经考虑了切换时间对产能的影响，这里不再重复减去切换时间
-        
-        Returns:
-            float: 预计日产量（颗）
-        """
-        # 获取瓶颈产能（已考虑切换时间影响）
-        bottleneck_capacity = self.get_bottleneck_capacity()
-        
-        # 计算有效工作时间（小时）
-        # 有效工作时间 = 班次时长 - 休息时间
-        effective_hours = self.shift_hours - (self.break_minutes / 60)
-        
-        # 日产量 = 瓶颈产能 × 有效工作时间
-        daily_output = bottleneck_capacity * effective_hours
-        
-        return daily_output
-    
+        """单个配置班次的理论良品上限，不含缺料、排队及随机质量损失。"""
+        if self.production_type == ProductionType.LIQUID_FILLING:
+            # 烟油只执行用户列出的批次；不把配方速度乘工人数。
+            remaining = self.effective_hours() * 3600
+            output = 0.0
+            previous = None
+            elapsed = 0.0
+            last_clean = 0.0
+            recipes = {recipe.name: recipe for recipe in self.recipes}
+            for index, batch in enumerate(self.batches):
+                recipe = recipes.get(batch.recipe_name)
+                if recipe is None or recipe.filling_rate_l_per_h <= 0:
+                    return 0.0
+                periodic = (
+                    index > 0 and self.cip_interval_batches > 0
+                    and index % self.cip_interval_batches == 0
+                ) or (
+                    self.cip_interval_hours > 0
+                    and (elapsed - last_clean) / 3600 >= self.cip_interval_hours
+                )
+                clean = 0.0
+                if previous is not None and previous != recipe.name:
+                    clean = self.changeover_matrix.get(previous, {}).get(
+                        recipe.name, recipe.clean_time_min
+                    )
+                if periodic:
+                    clean = max(clean, recipe.clean_time_min or 30.0)
+                cycle = (
+                    (recipe.mixing_time_min + recipe.aging_time_min + recipe.qc_time_min
+                     + clean) * 60 + batch.quantity_l / recipe.filling_rate_l_per_h * 3600
+                )
+                if cycle > remaining:
+                    break
+                remaining -= cycle
+                elapsed += cycle
+                if clean > 0:
+                    last_clean = elapsed - cycle + clean * 60
+                output += batch.quantity_l * recipe.yield_rate
+                previous = recipe.name
+            return output
+        return min((station.get_capacity() * self.effective_hours(station)
+                    for station in self.stations), default=0.0)
+
+    def total_worker_count(self) -> int:
+        """工序操作员及未在工序出现的支持工种，避免同一角色重复计数。"""
+        represented = {station.job_role.value for station in self.stations}
+        return sum(station.worker_count for station in self.stations) + sum(
+            count for role, count in self.labor_config.items() if role not in represented
+        )
+
+    def configuration_revision(self) -> str:
+        """配置身份；不包含运行时状态，供结果失效判定和报告追溯。"""
+        data = self.to_dict()
+        for station in data['stations']:
+            for key in ('current_status', 'wip_count', 'total_output'):
+                station.pop(key, None)
+        for batch in data['batches']:
+            for key in ('status', 'start_time', 'end_time', 'pass_rate', 'rework_count'):
+                batch.pop(key, None)
+        encoded = json.dumps(data, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
     def calculate_total_cost(self) -> float:
         """
         计算总人力成本（元/天）
@@ -566,7 +561,7 @@ class ProductionLine:
             float: 总人力成本（元/天）
         """
         # 计算总人数
-        total_workers = sum(station.worker_count for station in self.stations)
+        total_workers = self.total_worker_count()
         
         # 总成本 = 总人数 × 时薪 × 班次时长
         total_cost = total_workers * self.worker_hourly_wage * self.shift_hours
@@ -661,7 +656,7 @@ class ProductionLine:
             return 0.0
         
         # 计算总工人数
-        total_workers = sum(station.worker_count for station in self.stations)
+        total_workers = self.total_worker_count()
         
         # 如果没有工人，返回0（避免除零错误）
         if total_workers == 0:
@@ -809,8 +804,8 @@ class ProductionLine:
             labor_config=dict(data.get('labor_config', {})),
             cleanroom_limits=dict(data.get('cleanroom_limits', {})),
             skill_matrix={k: list(v) for k, v in data.get('skill_matrix', {}).items()},
-            cip_interval_batches=int(data.get('cip_interval_batches', 0)),
-            cip_interval_hours=float(data.get('cip_interval_hours', 0.0)),
+            cip_interval_batches=data.get('cip_interval_batches', 0),
+            cip_interval_hours=data.get('cip_interval_hours', 0.0),
             materials=[Material.from_dict(m) for m in data.get('materials', [])],
             inventory=dict(data.get('inventory', {})),
             material_arrivals=[
@@ -1004,7 +999,7 @@ class SimulationState:
     station_states: Dict[str, Dict[str, Any]]  # 各工序状态字典
     # 格式：{station_id: {'status': 'running', 'output': 100, 'wip': 5}}
     
-    total_output: int = 0  # 累计总产出（颗）
+    total_output: float = 0.0  # 末端合格量；烟油单位为千克
     bottleneck_id: Optional[str] = None  # 当前瓶颈工序ID
     
     def to_dict(self) -> Dict[str, Any]:
@@ -1053,7 +1048,7 @@ class Scenario:
                 - upph: UPPH（颗/人·小时）
         """
         # 计算总工人数
-        total_workers = sum(station.worker_count for station in self.production_line.stations)
+        total_workers = self.production_line.total_worker_count()
         
         # 计算所有KPI指标
         kpis = {
@@ -1116,7 +1111,7 @@ class SimulationResult:
 
     line_name: str
     duration_seconds: float
-    total_output: int
+    total_output: float
     station_outputs: Dict[str, int]
     station_wips: Dict[str, int]
     kpis: Dict[str, float]
@@ -1132,6 +1127,18 @@ class SimulationResult:
     unit: str = "颗"
     station_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
     line_config: Dict[str, Any] = field(default_factory=dict)
+    # V3.4：默认值确保已有测试和第三方构造器仍可使用旧参数。
+    run_id: str = ""
+    config_revision: str = ""
+    random_seed: Optional[int] = None
+    elapsed_seconds: float = 0.0
+    measurement_seconds: float = 0.0
+    warmup_seconds: float = 0.0
+    status: str = "completed"
+    model_scope: str = "discrete_station_flow"
+    closing_tanks: List[Dict[str, Any]] = field(default_factory=list)
+    incomplete_batches: List[Dict[str, Any]] = field(default_factory=list)
+    liquid_balance: Dict[str, float] = field(default_factory=dict)
 
 
 # ==================== V1.3 模板产线工厂函数 ====================
@@ -1207,6 +1214,7 @@ def create_pouch_line(name: str = "尼古丁袋包装线") -> ProductionLine:
     line.add_station(Station(
         "p01", "填充机", 1.0, 2,
         machine_takt=1.5,
+        machine_count=2,
         oee=0.90,
         clean_time_minutes=30.0,
         job_role=JobRole.PACKAGING_OPERATOR,
@@ -1218,6 +1226,7 @@ def create_pouch_line(name: str = "尼古丁袋包装线") -> ProductionLine:
     line.add_station(Station(
         "p02", "密封机", 1.0, 2,
         machine_takt=1.2,
+        machine_count=2,
         oee=0.92,
         job_role=JobRole.PACKAGING_OPERATOR,
         cleanroom_zone="C",

@@ -128,13 +128,41 @@ def test_load_from_file_missing_or_corrupt(tmp_path):
     assert manager.load_from_file(str(bad)) is False
 
 
-def test_persist_failure_does_not_block_save(tmp_path):
+def test_persist_failure_rolls_back_save(tmp_path):
     manager = ScenarioManager()
-    # storage_path 指向一个目录，save_to_file 会失败，但保存方案不应受影响
+    # Persistence must succeed before the UI can promise a saved snapshot.
     manager.set_storage_path(str(tmp_path))
     ok, err = manager.save_scenario("方案A", make_line())
-    assert ok is True and err is None
+    assert ok is False and "失败" in err
+    assert manager.get_scenario("方案A") is None
+
+
+def test_delete_failure_keeps_original_scenario(tmp_path):
+    manager = ScenarioManager()
+    manager.save_scenario("方案A", make_line())
+    manager.set_storage_path(str(tmp_path))
+    ok, err = manager.delete_scenario("方案A")
+    assert ok is False and "保留" in err
     assert manager.get_scenario("方案A") is not None
+
+
+def test_scenario_read_is_an_independent_snapshot():
+    manager = ScenarioManager()
+    manager.save_scenario("方案A", make_line())
+    working = manager.get_scenario("方案A")
+    working.production_line.stations[0].worker_count = 19
+    assert manager.get_scenario("方案A").production_line.stations[0].worker_count == 2
+
+
+def test_scenarios_cannot_compare_different_units():
+    from src.models import ProductionType
+    manager = ScenarioManager()
+    manager.save_scenario("A", make_line())
+    other = make_line()
+    other.production_type = ProductionType.POUCH_PACKAGING
+    manager.save_scenario("B", other)
+    with pytest.raises(ValueError, match="计量单位"):
+        manager.compare_scenarios(["A", "B"])
 
 
 def test_export_scenario_custom_path(tmp_path):

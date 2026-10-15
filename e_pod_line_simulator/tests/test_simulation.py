@@ -21,8 +21,8 @@ from src.simulation import SimulationEngine, detect_waste
 
 def make_line(name="测试产线"):
     line = ProductionLine(name, shift_hours=1, break_minutes=0)
-    line.add_station(Station("s01", "注油", 1.0, 1))
-    line.add_station(Station("s02", "包装", 1.0, 1))
+    line.add_station(Station("s01", "注油", 1.0, 1, changeover_time=0))
+    line.add_station(Station("s02", "包装", 1.0, 1, changeover_time=0))
     return line
 
 
@@ -39,15 +39,15 @@ def test_headless_run_returns_result():
 def test_tank_full_waits_instead_of_silent_drop():
     """V3.2 L2：罐容不足时批次等待并报警，禁止静默丢弃"""
     line = create_liquid_line()
-    line.tanks = [Tank("T1", "成品罐", 1000.0, 950.0)]
+    line.tanks = [Tank("T1", "成品罐", 100.0, 95.0)]
     line.batches = [Batch("B001", "经典烟草", 500.0)]
     recipe = line.recipes[0]
     recipe.mixing_time_min = 10.0
     recipe.aging_time_min = 0.0
-    recipe.filling_rate_l_per_h = 100000.0
+    recipe.filling_rate_l_per_h = 200.0
     recipe.qc_time_min = 5.0
     recipe.clean_time_min = 0.0
-    line.stations[0].process_time = 60.0  # 减缓灌装消耗，触发满罐等待
+    # 批次475千克超过100千克罐容，须分段入罐等待配方速率排空。
 
     result = SimulationEngine(line).run_sync(duration_hours=6.0)
 
@@ -181,19 +181,20 @@ def test_assembly_rework_returns_item_to_line():
     assert result.station_outputs["s02"] >= 1
 
 
-def test_liquid_tanks_drain_by_first_station_capacity():
-    """V3.2 L2：成品罐按首工序（灌装）产能持续消耗"""
+def test_liquid_tanks_drain_by_recipe_rate():
+    """V3.4：成品罐按配方灌装速度消耗，操作员人数不改变速率。"""
     line = create_liquid_line()
     tank = Tank("T1", "成品罐", 5000.0, 500.0)
     line.tanks = [tank]
 
     result = SimulationEngine(line).run_sync(duration_hours=1.0)
 
-    first_capacity = line.stations[0].get_capacity()
-    withdrawn = 500.0 - tank.current_level_l
+    first_capacity = line.recipes[0].filling_rate_l_per_h
+    closing_level = result.closing_tanks[0]["current_level_l"]
+    withdrawn = 500.0 - closing_level
     assert withdrawn > 0
     assert withdrawn <= first_capacity + first_capacity / 60.0 + 1e-6
-    assert tank.current_level_l >= 0
+    assert closing_level >= 0
 
 
 def test_changeover_reduces_output_and_records_event():
@@ -400,7 +401,7 @@ def test_pouch_machine_takt_throughput():
     line = ProductionLine("袋装节拍测试", production_type=ProductionType.POUCH_PACKAGING)
     line.add_station(Station(
         "p01", "填充机", 1.0, 2,
-        machine_takt=1.0, oee=1.0, efficiency=1.0,
+        machine_count=2, machine_takt=1.0, oee=1.0, efficiency=1.0,
         changeover_time=0, clean_time_minutes=0,
     ))
     result = SimulationEngine(line).run_sync(duration_hours=1.0)

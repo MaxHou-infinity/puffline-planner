@@ -4,6 +4,7 @@ import logging
 import os
 
 import pandas as pd
+import pytest
 
 from src.models import (
     CollaborationType,
@@ -245,3 +246,54 @@ def test_ui_config_roundtrip(tmp_path, monkeypatch):
     assert save_ui_config({"theme": "dark"}) is True
     assert load_ui_config() == {"theme": "dark"}
     assert load_ui_config()["theme"] == "dark"
+
+
+@pytest.mark.parametrize("values", [
+    ("nan", "0", "20"), ("inf", "0", "20"), ("8", "nan", "20"),
+    ("8", "0", "inf"), ("8", "480", "20"), ("8", "900", "20"),
+])
+def test_shift_rejects_nonfinite_or_impossible_break(values):
+    with pytest.raises(ValueError):
+        parse_shift_params(*values)
+
+
+@pytest.mark.parametrize("attribute,value", [
+    ("oee", 2), ("oee", float("nan")), ("efficiency", -1),
+    ("sampling_rate", 1.1), ("defect_rate", -0.1), ("rework_minutes", -1),
+    ("buffer_capacity", 1.5), ("machine_takt", 0), ("worker_count", 2.5),
+])
+def test_full_model_rejects_invalid_station_fields(attribute, value):
+    line = ProductionLine("invalid")
+    station = Station("s", "station", 1, 1)
+    setattr(station, attribute, value)
+    line.stations.append(station)
+    assert validate_production_line(line)[0] is False
+
+
+def test_atomic_json_failure_preserves_original(tmp_path):
+    from src.utils import atomic_write_json
+    target = tmp_path / 'safe.json'
+    target.write_text('{"saved": true}', encoding='utf-8')
+    with pytest.raises(ValueError):
+        atomic_write_json(str(target), {"invalid": float('nan')})
+    assert target.read_text() == '{"saved": true}'
+    assert not list(tmp_path.glob('.puffline-*'))
+
+
+def test_data_paths_can_be_isolated_without_creating_directory(tmp_path, monkeypatch):
+    from src.utils import get_app_data_dir, get_user_data_path
+    isolated = tmp_path / 'isolated'
+    monkeypatch.setenv('PUFFLINE_DATA_DIR', str(isolated))
+    assert get_app_data_dir() == str(isolated)
+    assert get_user_data_path('run_history.json') == str(isolated / 'run_history.json')
+    assert not isolated.exists()
+
+
+def test_excel_rejects_explicit_invalid_efficiency_and_fractional_people(tmp_path):
+    for key, invalid in [('OEE', 2), ('OEE', 'nan'), ('人数', 1.5)]:
+        values = {'工序名': ['工序'], '耗时(秒)': [1], '人数': [1], 'OEE': [.9]}
+        values[key] = [invalid]
+        path = tmp_path / (key + '.xlsx')
+        pd.DataFrame(values).to_excel(path, index=False)
+        line, error = import_from_excel(str(path))
+        assert line is None and error

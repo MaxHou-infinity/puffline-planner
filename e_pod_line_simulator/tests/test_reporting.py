@@ -116,3 +116,72 @@ def test_export_hr_report_excel_and_pdf(tmp_path):
         str(c.value) for row in wb["概览"].iter_rows() for c in row if c.value
     ]
     assert any("每小时需求" in v for v in overview_values)
+
+
+def test_partial_liquid_report_keeps_run_identity_and_mass_balance(tmp_path):
+    """A tank-blocked batch must remain visible instead of becoming finished goods."""
+    from openpyxl import load_workbook
+    from src.models import Batch, ProductionType, Recipe, Tank
+
+    line = ProductionLine("小罐守恒", production_type=ProductionType.LIQUID_FILLING)
+    line.recipes = [Recipe(
+        "R", batch_volume_l=100, yield_rate=1, mixing_time_min=0,
+        aging_time_min=0, filling_rate_l_per_h=6000, qc_time_min=0, clean_time_min=0,
+    )]
+    line.batches = [Batch("B", "R", 100)]
+    line.tanks = [Tank("T", "成品罐", 10)]
+    result = SimulationEngine(line).run_sync(70 / 3600)
+    path = tmp_path / "partial.xlsx"
+    assert export_excel(result, str(path))
+    wb = load_workbook(path, data_only=True)
+    assert {"期末罐存", "未完成批次", "液体守恒"}.issubset(wb.sheetnames)
+    values = [cell.value for row in wb["KPI"] for cell in row]
+    assert result.run_id in values
+    assert result.config_revision in values
+    assert result.total_output == 0
+    assert result.liquid_balance["closing_tank_quantity"] == 10
+    assert result.liquid_balance["pending_tank_quantity"] == 90
+    assert "B" in [cell.value for row in wb["未完成批次"] for cell in row]
+    assert 90 in [cell.value for row in wb["液体守恒"] for cell in row]
+    wb.close()
+
+
+def test_bundled_chinese_font_is_embedded_in_pdf(tmp_path, monkeypatch):
+    """Reports must carry their font, even on a machine without Chinese fonts."""
+    import src.reporting as reporting
+
+    monkeypatch.setattr(reporting, "_CN_FONT_CANDIDATES", [reporting._BUNDLED_CN_FONT])
+    monkeypatch.setattr(reporting, "_CN_FONT_NAME", None)
+    monkeypatch.setattr(reporting, "_CN_FONT_REGISTERED", False)
+    path = tmp_path / "portable.pdf"
+    assert export_pdf(make_result(), str(path))
+    pdf = path.read_bytes()
+    assert b"/FontFile2" in pdf
+    assert b"/ToUnicode" in pdf
+    assert "NotoSansSC" in reporting._CN_FONT_NAME
+
+
+def test_pdf_keeps_changeover_request_actual_start_and_end(tmp_path, monkeypatch):
+    from reportlab.platypus import SimpleDocTemplate, Table
+
+    result = make_result()
+    result.changeover_events = [{
+        'station_name': '注油', 'requested_time': 90, 'start_time': 120,
+        'end_time': 180, 'minutes': 1, 'status': 'completed',
+    }]
+    table_text = []
+    original_build = SimpleDocTemplate.build
+
+    def inspect_build(document, story, *args, **kwargs):
+        for item in story:
+            if isinstance(item, Table):
+                table_text.extend(
+                    cell.getPlainText() if hasattr(cell, 'getPlainText') else str(cell)
+                    for row in item._cellvalues for cell in row
+                )
+        return original_build(document, story, *args, **kwargs)
+
+    monkeypatch.setattr(SimpleDocTemplate, 'build', inspect_build)
+    assert export_pdf(result, str(tmp_path / 'changeover.pdf'))
+    for expected in ('申请(分)', '开始(分)', '结束(分)', '1.50', '2.00', '3.00', 'completed'):
+        assert expected in table_text

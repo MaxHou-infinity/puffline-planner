@@ -40,7 +40,7 @@ def make_station(
 
 def test_station_capacity_parallel():
     station = make_station()
-    expected = (3600 / 25) * 2 * 0.85 * 0.95 * (1 - 45 / 480)
+    expected = (3600 / 25) * 2 * 0.85 * 0.95
     assert station.get_capacity() == pytest.approx(expected, rel=1e-6)
 
 
@@ -83,8 +83,8 @@ def test_daily_cost_and_output_formula():
     # 日成本 = 总人数 × 时薪 × 班次时长（不扣休息）
     assert line.calculate_total_cost() == 3 * 20.0 * 8
 
-    # 日产量 = 瓶颈产能 × 有效工时（班次时长 - 休息时间）
-    effective_hours = 8 - 60 / 60
+    # 日产量在真实班次内扣除休息与一次计划换型，不固定按8h摊销。
+    effective_hours = 8 - 60 / 60 - 45 / 60
     assert line.calculate_daily_output() == pytest.approx(
         line.get_bottleneck_capacity() * effective_hours,
         rel=1e-9,
@@ -168,7 +168,8 @@ def test_pouch_station_machine_takt_capacity():
         id="p01",
         name="填充机",
         process_time=1.0,  # 机台节拍模式下不使用
-        worker_count=3,     # 机台数
+        worker_count=3,     # 操作员人数
+        machine_count=3,    # 设备台数独立配置
         machine_takt=6.0,   # 6 秒/袋
         oee=0.9,
         efficiency=1.0,
@@ -238,8 +239,9 @@ def test_pouch_template_line_machine_takt():
     assert line.production_type == ProductionType.POUCH_PACKAGING
     filling = line.get_station("p01")
     assert filling.machine_takt == 1.5
-    # 填充机产能 = 3600/1.5 × 2 × 0.90 × 0.95 × (1 - 75/480) = 3462.75 袋/h
-    assert filling.get_capacity() == pytest.approx(3462.75, rel=1e-6)
+    # 生产小时能力不摊销停机；每日总量在产线日历中另扣换型/清洗/休息。
+    assert filling.machine_count == 2
+    assert filling.get_capacity() == pytest.approx(4104.0, rel=1e-6)
 
 
 def test_labor_validation():
@@ -262,3 +264,44 @@ def test_labor_validation():
     line.skill_matrix["bogus"] = []
     ok, msg = line.validate_labor()
     assert ok is False and "技能矩阵" in msg
+
+
+def test_machine_count_is_separate_from_operator_count():
+    station = Station("m", "machine", 1, 2, machine_takt=6, machine_count=3,
+                      oee=1, efficiency=1, changeover_time=0)
+    assert station.get_capacity() == 1800
+    station.worker_count = 8
+    assert station.get_capacity() == 1800
+    station.machine_count = 4
+    assert station.get_capacity() == 2400
+
+
+def test_old_machine_configuration_migrates_once_without_mutating_input():
+    data = {"id": "m", "name": "machine", "process_time": 1,
+            "worker_count": 3, "machine_takt": 6, "collaboration_type": "parallel"}
+    restored = Station.from_dict(data)
+    assert restored.machine_count == restored.worker_count == 3
+    assert "machine_count" not in data
+    assert data["collaboration_type"] == "parallel"
+    assert Station.from_dict(restored.to_dict()).machine_count == 3
+    assert Station("new", "new", 1, 3, machine_takt=6).machine_count == 1
+
+
+def test_configuration_revision_ignores_runtime_but_detects_real_inputs():
+    line = ProductionLine("revision")
+    line.add_station(make_station())
+    revision = line.configuration_revision()
+    line.stations[0].current_status = "running"
+    line.stations[0].wip_count = 100
+    assert line.configuration_revision() == revision
+    line.stations[0].worker_count += 1
+    assert line.configuration_revision() != revision
+
+
+def test_assembly_support_roles_are_in_daily_cost_and_upph():
+    line = ProductionLine("supports", shift_hours=8)
+    line.add_station(make_station(workers=2))
+    line.labor_config = {"general": 2, "cleaner": 1}
+    assert line.total_worker_count() == 3
+    assert line.calculate_total_cost() == 3 * 20 * 8
+    assert line.calculate_upph() == line.get_bottleneck_capacity() / 3

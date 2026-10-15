@@ -15,9 +15,11 @@
 
 import json
 import os
+import copy
 from typing import Dict, List, Optional, Any, Tuple
 
 from src.models import Scenario, ProductionLine
+from src.utils import atomic_write_json, validate_production_line
 
 
 class ScenarioManager:
@@ -94,9 +96,16 @@ class ScenarioManager:
         
         # 创建方案对象（使用工厂方法，自动处理深拷贝和时间戳）
         try:
+            valid, error = validate_production_line(production_line, allow_empty=True)
+            if not valid:
+                return False, error
             scenario = Scenario.create(name, production_line, description)
             self.scenarios[name] = scenario
-            self._persist()
+            try:
+                self._persist()
+            except Exception:
+                del self.scenarios[name]
+                raise
             return True, None
         except Exception as e:
             return False, f"保存方案失败：{str(e)}"
@@ -121,17 +130,19 @@ class ScenarioManager:
             # 如果删除后方案数量少于2个，仍然允许删除（用户可能想重新开始）
             pass
         
-        del self.scenarios[name]
-        self._persist()
-        return True, None
+        previous = self.scenarios.pop(name)
+        try:
+            self._persist()
+            return True, None
+        except Exception as exc:
+            self.scenarios[name] = previous
+            return False, f"删除方案失败，原方案已保留：{exc}"
 
     def _persist(self) -> None:
-        """保存/删除方案后自动写入存储文件（静默失败，不影响主流程）"""
+        """Persist a mutation or propagate failure so the caller can roll it back."""
         if self.storage_path:
-            try:
-                self.save_to_file(self.storage_path)
-            except Exception:
-                pass
+            if not self.save_to_file(self.storage_path):
+                raise OSError("方案文件未能保存")
 
     def save_to_file(self, path: str) -> bool:
         """
@@ -154,8 +165,7 @@ class ScenarioManager:
         directory = os.path.dirname(path)
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(path, data)
         return True
 
     def export_scenario(self, name: str, path: str) -> bool:
@@ -185,8 +195,7 @@ class ScenarioManager:
         directory = os.path.dirname(path)
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(path, data)
         return True
 
     def load_from_file(self, path: str) -> bool:
@@ -207,6 +216,9 @@ class ScenarioManager:
             loaded = {}
             for name, item in data.items():
                 line = ProductionLine.from_dict(item['production_line'])
+                valid, error = validate_production_line(line, allow_empty=True)
+                if not valid:
+                    raise ValueError(error)
                 loaded[name] = Scenario(
                     name=name,
                     production_line=line,
@@ -228,7 +240,8 @@ class ScenarioManager:
         Returns:
             Optional[Scenario]: 方案对象，如果不存在返回None
         """
-        return self.scenarios.get(name)
+        scenario = self.scenarios.get(name)
+        return copy.deepcopy(scenario) if scenario is not None else None
     
     def list_scenarios(self) -> List[str]:
         """
@@ -301,6 +314,9 @@ class ScenarioManager:
         for name in scenario_names:
             if name not in self.scenarios:
                 raise ValueError(f"方案'{name}'不存在")
+        units = {self.scenarios[name].production_line.get_unit() for name in scenario_names}
+        if len(units) != 1:
+            raise ValueError("不同生产类型或计量单位的方案不能直接比较")
         
         # 获取所有方案的KPI
         scenario_kpis = []
@@ -323,8 +339,8 @@ class ScenarioManager:
                 ('total_workers', '总人数', '人'),
                 ('bottleneck_capacity', '瓶颈产能', f'{unit}/h'),
                 ('daily_output', '日产量', unit),
-                ('total_cost', '日成本', '元'),
-                ('unit_cost', '单位成本', f'元/{unit}'),
+                ('total_cost', '预计日人工成本', '元'),
+                ('unit_cost', '预计单位人工成本', f'元/{unit}'),
                 ('balance_rate', '产线平衡率', '%'),
                 ('upph', 'UPPH', f'{unit}/人·h')
             ]
@@ -381,22 +397,15 @@ class ScenarioManager:
             advantages = []
             
             # 检查各项指标是否最优
-            for scenario_data in scenario_kpis:
-                if scenario_data['name'] == best_scenario:
-                    continue
-                other_kpis = scenario_data['kpis']
-                
-                if best_kpis['daily_output'] > other_kpis['daily_output']:
-                    advantages.append("产能最高")
-                if best_kpis['balance_rate'] > other_kpis['balance_rate']:
-                    advantages.append("平衡率最高")
-                if best_kpis['upph'] > other_kpis['upph']:
-                    advantages.append("UPPH最高")
+            for key, label in [('daily_output', '预计产能最高'),
+                               ('balance_rate', '预计平衡率最高'), ('upph', '预计UPPH最高')]:
+                if all(best_kpis[key] >= other['kpis'][key] for other in scenario_kpis):
+                    advantages.append(label)
             
             if advantages:
-                recommendation_reason = f"{best_scenario}（单位成本最低，{', '.join(advantages)}）"
+                recommendation_reason = f"{best_scenario}（预计单位人工成本最低，{', '.join(advantages)}）"
             else:
-                recommendation_reason = f"{best_scenario}（单位成本最低）"
+                recommendation_reason = f"{best_scenario}（预计单位人工成本最低）"
         
         return {
             'scenarios': scenario_kpis,

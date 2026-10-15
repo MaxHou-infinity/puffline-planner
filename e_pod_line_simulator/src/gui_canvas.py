@@ -128,7 +128,8 @@ class CanvasView(tk.Canvas):
             width: 画布宽度（像素）
             height: 画布高度（像素）
         """
-        super().__init__(parent, width=width, height=height, bg=COLORS['canvas'], **kwargs)
+        super().__init__(parent, width=width, height=height, bg=COLORS['canvas'],
+                         takefocus=True, **kwargs)
         
         # 产线数据
         self.production_line: Optional[ProductionLine] = None
@@ -184,6 +185,11 @@ class CanvasView(tk.Canvas):
         self.bind("<ButtonRelease-1>", self._on_drag_end)
         self.bind("<Button-3>", self._on_right_click)
         self.bind("<Motion>", self._on_motion)
+        self.bind("<MouseWheel>", self._on_mousewheel)
+        self.bind("<Button-4>", lambda event: self.yview_scroll(-1, "units"))
+        self.bind("<Button-5>", lambda event: self.yview_scroll(1, "units"))
+        self.bind("<Down>", lambda event: self.yview_scroll(1, "units"))
+        self.bind("<Up>", lambda event: self.yview_scroll(-1, "units"))
         
         # 绑定窗口大小变化事件（当画布大小变化时重新布局）
         self.bind("<Configure>", self._on_canvas_resize)
@@ -321,6 +327,17 @@ class CanvasView(tk.Canvas):
         if self.selected_station_id in self.station_cards:
             self.highlight_station(self.selected_station_id)
         self._draw_batch_summary()
+        bounds = self.bbox("all")
+        if bounds:
+            self.configure(scrollregion=(
+                min(0, bounds[0] - 20), min(0, bounds[1] - 20),
+                max(canvas_width, bounds[2] + 20), max(canvas_height, bounds[3] + 30),
+            ))
+
+    def _on_mousewheel(self, event):
+        delta = -1 if event.delta > 0 else 1
+        self.yview_scroll(delta * 3, "units")
+        return "break"
 
     def _draw_type_badge(self) -> None:
         """绘制生产类型徽标（V1.3 流程型布局提示）"""
@@ -778,12 +795,15 @@ class CanvasView(tk.Canvas):
         Args:
             event: 鼠标事件
         """
+        if not self.drag_enabled:
+            return
         station_id = self._station_id_at(event.x, event.y)
         if station_id and self.on_station_edit:
             self.on_station_edit(station_id)
 
     def _station_id_at(self, x: int, y: int) -> Optional[str]:
         """获取坐标处的工序 ID（通过 Canvas tags 查找）"""
+        x, y = self.canvasx(x), self.canvasy(y)
         items = self.find_overlapping(x - 2, y - 2, x + 2, y + 2)
         if not items:
             closest = self.find_closest(x, y)
@@ -822,7 +842,7 @@ class CanvasView(tk.Canvas):
         if abs(self._drag_total_dx) > 5 or abs(self._drag_total_dy) > 5:
             self._drag_moved = True
         self.move(f"station_{self._drag_station_id}", dx, dy)
-        self._update_drop_indicator(event.x, event.y)
+        self._update_drop_indicator(self.canvasx(event.x), self.canvasy(event.y))
 
     def _update_drop_indicator(self, x: int, y: int) -> None:
         """绘制拖拽落点指示（高亮最近目标工序卡片）"""

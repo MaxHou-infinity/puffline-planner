@@ -17,6 +17,7 @@ import tkinter as tk
 import os
 import webbrowser
 import copy
+import math
 from tkinter import ttk, messagebox, filedialog
 from typing import List, Optional, Callable, Dict, Any
 
@@ -75,6 +76,40 @@ from src.sensitivity import run_sweep
 from src.optimizer import _params_text, optimize
 from src.simulation import SimulationEngine
 from src.gui_jobs import BackgroundJob, set_dialog_busy
+
+
+def format_cost(value, digits=3):
+    """Zero output has no unit cost; never render it as a free product."""
+    return "不可计算" if value is None else f"{value:.{digits}f}"
+
+
+def scrollable_form(parent, padding=15):
+    """A resizable form whose controls remain reachable on small displays."""
+    container = ttk.Frame(parent)
+    container.pack(fill=tk.BOTH, expand=True)
+    canvas = tk.Canvas(container, highlightthickness=0, takefocus=False)
+    scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    content = ttk.Frame(canvas, padding=padding)
+    window = canvas.create_window((0, 0), window=content, anchor="nw")
+    content.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+    # Focus follows keyboard navigation even when the next field is below the viewport.
+    def reveal(event):
+        widget = event.widget
+        if not str(widget).startswith(str(content)):
+            return
+        canvas.update_idletasks()
+        top = widget.winfo_rooty() - content.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        visible_top = canvas.canvasy(0)
+        if top < visible_top or bottom > visible_top + canvas.winfo_height():
+            height = max(1, content.winfo_reqheight())
+            canvas.yview_moveto(max(0, top - 20) / height)
+    parent.bind("<FocusIn>", reveal, add="+")
+    return content
 
 
 def fuzzy_contains(text: str, query: str) -> bool:
@@ -465,8 +500,8 @@ class KPIDashboard(ttk.LabelFrame):
         kpis = [
             ('bottleneck_capacity', '瓶颈产能', '颗/h'),
             ('daily_output', '预计日产量', '颗'),
-            ('total_cost', '日成本', '元'),
-            ('unit_cost', '单颗成本', '元/颗'),
+            ('total_cost', '日人工成本', '元'),
+            ('unit_cost', '单位人工成本', '元/颗'),
             ('balance_rate', '产线平衡率', '%'),
             ('upph', 'UPPH', '颗/人·h')
         ]
@@ -537,11 +572,29 @@ class KPIDashboard(ttk.LabelFrame):
             self, text="本次仿真产出：--", foreground=COLORS['text_secondary'],
         )
         self.actual_output_label.pack(fill=tk.X, pady=(2, 0))
+        self._kpi_frame = kpi_frame
+        self._kpi_columns = 6
+        self.bind("<Configure>", self._reflow_kpis)
 
-    def update_actual_output(self, output: int) -> None:
+    def _reflow_kpis(self, event):
+        columns = 6 if event.width >= 900 else (3 if event.width >= 480 else 2)
+        if columns == self._kpi_columns:
+            return
+        self._kpi_columns = columns
+        for column in range(6):
+            self._kpi_frame.grid_columnconfigure(column, weight=1 if column < columns else 0)
+        for index, cell in enumerate(self.kpi_cells.values()):
+            cell.grid(row=index // columns, column=index % columns, sticky="nsew", padx=3, pady=3)
+
+    def clear_actual_output(self, reason="尚未仿真"):
+        self.actual_output_label.config(text=f"本次仿真产出：--（{reason}）")
+        self.reset_timestamp()
+
+    def update_actual_output(self, output: float) -> None:
         """Show simulated output separately from formula-based estimates."""
         unit = getattr(self, "current_unit", "颗")
-        self.actual_output_label.config(text=f"本次仿真产出：{output:,} {unit}")
+        value = f"{output:,.3f}".rstrip("0").rstrip(".") if output % 1 else f"{output:,.0f}"
+        self.actual_output_label.config(text=f"本次仿真产出：{value} {unit}")
     
     def update_timestamp(self, minutes: float) -> None:
         """
@@ -636,8 +689,8 @@ class KPIDashboard(ttk.LabelFrame):
         label_map = {
             'bottleneck_capacity': ('预计瓶颈产能', f'{unit}/h'),
             'daily_output': ('预计日产量', unit),
-            'total_cost': ('预计日成本', '元'),
-            'unit_cost': ('预计单位成本', f'元/{unit}'),
+            'total_cost': ('预计日人工成本', '元'),
+            'unit_cost': ('预计单位人工成本', f'元/{unit}'),
             'balance_rate': ('预计平衡率', '%'),
             'upph': ('预计 UPPH', f'{unit}/人·h'),
         }
@@ -835,7 +888,7 @@ class StationDialog:
         # 创建对话框窗口
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
-        self.dialog.geometry("460x500")
+        self.dialog.geometry("500x580")
         self.dialog.transient(parent)  # 设置为父窗口的子窗口
         self.dialog.grab_set()  # 模态对话框
         
@@ -857,8 +910,7 @@ class StationDialog:
     def _create_widgets(self, station: Optional[Station]) -> None:
         """创建界面组件"""
         # 主框架
-        main_frame = ttk.Frame(self.dialog, padding=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = scrollable_form(self.dialog, padding=20)
         
         # 工序名称
         ttk.Label(main_frame, text="工序名称:").grid(row=0, column=0, sticky=tk.W, pady=5)
@@ -946,6 +998,16 @@ class StationDialog:
             main_frame, textvariable=self.machine_takt_var, width=30
         )
         self.machine_takt_entry.grid(row=6, column=1, pady=5)
+        self.machine_count_var = tk.StringVar(
+            value=str(getattr(station, "machine_count", 1))
+        )
+        self.machine_count_label = ttk.Label(main_frame, text="机台数量（台）:")
+        self.machine_count_label.grid(row=11, column=0, sticky=tk.W, pady=5)
+        self.machine_count_entry = ttk.Entry(
+            main_frame, textvariable=self.machine_count_var, width=30
+        )
+        self.machine_count_entry.grid(row=11, column=1, pady=5)
+        ToolTip(self.machine_count_entry, "机台产能由台数决定；工人数量用于岗位和人工成本。")
 
         self.clean_time_label = ttk.Label(main_frame, text="清洗时间(分钟):")
         self.clean_time_label.grid(row=7, column=0, sticky=tk.W, pady=5)
@@ -979,7 +1041,7 @@ class StationDialog:
         
         # 按钮框架
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=11, column=0, columnspan=2, pady=20)
+        button_frame.grid(row=12, column=0, columnspan=2, pady=20)
         
         # 确定按钮
         btn_ok = ttk.Button(button_frame, text="确定", command=self._btn_ok, style="Primary.TButton")
@@ -1011,10 +1073,15 @@ class StationDialog:
             if key in visible:
                 label.grid()
                 entry.grid()
-                entry.config(state=tk.NORMAL)
+                entry.config(state="readonly" if isinstance(entry, ttk.Combobox) else tk.NORMAL)
             else:
                 label.grid_remove()
                 entry.grid_remove()
+        for widget in (self.machine_count_label, self.machine_count_entry):
+            if self.line_type == ProductionType.POUCH_PACKAGING:
+                widget.grid()
+            else:
+                widget.grid_remove()
     
     def _btn_ok(self) -> None:
         """确定按钮点击"""
@@ -1034,6 +1101,9 @@ class StationDialog:
             # V1.3 可选字段
             machine_takt_text = self.machine_takt_var.get().strip()
             machine_takt = float(machine_takt_text) if machine_takt_text else None
+            machine_count = int(self.machine_count_var.get())
+            if machine_count < 1:
+                raise ValueError("机台数量必须为正整数")
             clean_time = float(self.clean_time_var.get() or 0)
             sampling = float(self.sampling_var.get() or 0)
             defect = float(self.defect_var.get() or 0)
@@ -1053,7 +1123,7 @@ class StationDialog:
                 return
             
             # 校验OEE
-            if not 0 < oee <= 1:
+            if not 0 <= oee <= 1:
                 messagebox.showerror("错误", "OEE必须在0-1之间")
                 return
             
@@ -1079,6 +1149,7 @@ class StationDialog:
                 job_role=job_role,
                 oee=oee,
                 machine_takt=machine_takt,
+                machine_count=machine_count,
                 clean_time_minutes=clean_time,
                 sampling_rate=sampling,
                 defect_rate=defect,
@@ -1391,6 +1462,7 @@ class SaveScenarioDialog:
             if export_path:
                 if not self.scenario_manager.export_scenario(name, export_path):
                     messagebox.showwarning("警告", "方案已保存到内部，但导出到自定义路径失败")
+                    export_path = ""
             self.result = {
                 'name': name,
                 'description': description,
@@ -1576,8 +1648,8 @@ class ScenarioCompareDialog:
             ('total_workers', '总人数', '人', lambda x: f"{int(x)}人"),
             ('bottleneck_capacity', '瓶颈产能', f'{unit}/h', lambda x: f"{x:.0f}"),
             ('daily_output', '日产量', unit, lambda x: f"{x:.0f}"),
-            ('total_cost', '日成本', '元', lambda x: f"{x:.0f}"),
-            ('unit_cost', '单位成本', f'元/{unit}', lambda x: f"{x:.2f}"),
+            ('total_cost', '日人工成本', '元', lambda x: f"{x:.0f}"),
+            ('unit_cost', '单位人工成本', f'元/{unit}', lambda x: f"{x:.2f}"),
             ('balance_rate', '产线平衡率', '%', lambda x: f"{x*100:.1f}%"),
             ('upph', 'UPPH', f'{unit}/人·h', lambda x: f"{x:.1f}")
         ]
@@ -1682,6 +1754,7 @@ class ScenarioManageDialog:
         self._create_widgets()
         self.dialog.bind('<Escape>', lambda e: self.dialog.destroy())
         self.dialog.bind('<Button-1>', self._on_tree_click)
+        self.dialog.after_idle(self.tree.focus_set)
 
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
@@ -1726,7 +1799,7 @@ class ScenarioManageDialog:
         self.tree.heading('name', text='方案名称')
         self.tree.heading('created_at', text='创建时间')
         self.tree.heading('description', text='描述')
-        self.tree.heading('unit_cost', text='单位成本')
+        self.tree.heading('unit_cost', text='单位人工成本')
         self.tree.column('#0', width=0, stretch=False, anchor=tk.CENTER)
         self.tree.column('name', width=140)
         self.tree.column('created_at', width=140)
@@ -1766,20 +1839,33 @@ class ScenarioManageDialog:
 
     def _refresh(self) -> None:
         """刷新方案列表"""
+        selection = self.tree.selection()
+        selected_name = None
+        if selection:
+            tags = self.tree.item(selection[0], "tags")
+            selected_name = tags[0] if tags else None
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.tree.tag_configure('even', background=COLORS['surface'])
         self.tree.tag_configure('odd', background=COLORS['bg'])
+        selected_item = None
         for idx, name in enumerate(self.scenario_manager.list_scenarios()):
             scenario = self.scenario_manager.get_scenario(name)
             kpis = scenario.get_kpis()
             check_image = self._img_checked if self.checked.get(name) else self._img_unchecked
-            self.tree.insert('', tk.END, values=(
+            item = self.tree.insert('', tk.END, values=(
                 name,
                 scenario.created_at,
                 scenario.description,
                 f"{kpis['unit_cost']:.3f}",
             ), image=check_image, text="", tags=(name, 'even' if idx % 2 == 0 else 'odd'))
+            if selected_item is None or name == selected_name:
+                selected_item = item
+        if selected_item is not None:
+            self.tree.selection_set(selected_item)
+            self.tree.focus(selected_item)
+            self.tree.see(selected_item)
+        self.tree.focus_set()
 
     def _on_tree_click(self, event: tk.Event) -> None:
         """点击复选框列切换勾选状态（仅对比模式）"""
@@ -1860,8 +1946,8 @@ class ScenarioManageDialog:
             return
         name = tags[0]
         if self.on_import:
-            self.on_import(name)
-            messagebox.showinfo("成功", f"已导入方案：{name}")
+            if self.on_import(name):
+                messagebox.showinfo("成功", f"已导入方案：{name}")
         else:
             messagebox.showinfo("提示", f"选中方案：{name}")
 
@@ -2069,7 +2155,7 @@ class HrPlanningDialog:
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("人力规划（HRBP/HR）")
-        self.dialog.geometry("720x760")
+        self.dialog.geometry(f"760x{min(760, parent.winfo_screenheight() - 120)}")
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
@@ -2096,8 +2182,7 @@ class HrPlanningDialog:
         break_default = str(line.break_minutes) if line else "60"
         wage_default = str(line.worker_hourly_wage) if line else "20.0"
 
-        main = ttk.Frame(self.dialog, padding=15)
-        main.pack(fill=tk.BOTH, expand=True)
+        main = scrollable_form(self.dialog, padding=15)
 
         def _row(row, col, label, var, width=12, padx=(0, 0), hint=None):
             label_widget = ttk.Label(main, text=label)
@@ -2143,9 +2228,9 @@ class HrPlanningDialog:
              hint="新员工从入职到满效率所需天数（默认 90 天线性爬坡）")
 
         current_label = (
-            "当前在岗（人数；留空按 0 计，可用「按当前产线填充」带入）:"
+            "当前全日总编制（人数；留空按 0 计，可用「按当前产线填充」带入）:"
             if self._single_role
-            else "当前在岗（每行 工种:人数；留空按 0 计）:"
+            else "当前全日总编制（每行 工种:人数；留空按 0 计）:"
         )
         ttk.Label(main, text=current_label).grid(
             row=5, column=0, columnspan=4, sticky=tk.W, pady=(12, 2)
@@ -2185,12 +2270,13 @@ class HrPlanningDialog:
             "使用说明",
             "目的：按目标产量估算产线需要的人数、排班与人力成本，"
             "供 HRBP/HR 做预算、招聘与爬坡规划。\n"
-            "需求口径：达成目标产量的最低人数；"
+            "需求口径：达成目标产量的每班最低岗位人数，乘班次数得到全日岗位编制；"
+            "覆盖编制另外计入缺勤替补，招聘缺口、达产天数和成本采用覆盖编制。"
             "每工序需求 = 每小时目标 ÷ 单人产能（向上取整）。\n"
-            "单人产能公式：3600÷单件耗时×OEE×效率×(1−切换占比)（并联时÷人数）。\n"
+            "机台与协同工序受设备/团队能力约束，加人不能越过硬件上限。\n"
             "当前在岗：留空按 0 人计（视为无在岗人员）；"
-            "点「按当前产线填充」可把产线现有配置带入。\n"
-            "缺口口径：缺口 = 需求 − 当前在岗 − 已计划到岗，"
+            "点「按当前产线填充」按每班配置×班次估算全日编制，请核实实际可用人数。\n"
+            "缺口口径：缺口 = 覆盖编制 − 当前在岗 − 已计划到岗，"
             "指“还缺多少人”（累计），不是每周都要招这么多人；"
             "本周新增 = 较上周的新增缺口。\n"
             "成本 = 在岗人数 ×（基本工资 + 加班 + 社保福利）。\n"
@@ -2236,7 +2322,7 @@ class HrPlanningDialog:
             target = float(self.target_var.get())
             shifts = int(self.shifts_var.get())
             shift_hours = float(self.shift_hours_var.get())
-            break_minutes = int(self.break_var.get())
+            break_minutes = float(self.break_var.get())
             overtime = float(self.overtime_var.get())
             wage = float(self.wage_var.get())
             social = float(self.social_var.get())
@@ -2284,8 +2370,16 @@ class HrPlanningDialog:
     def _fill_current(self) -> None:
         """按当前产线在岗配置填充（V3.3）"""
         if self.line:
+            try:
+                shifts = int(self.shifts_var.get())
+                if shifts < 1:
+                    raise ValueError()
+            except ValueError:
+                messagebox.showerror("班次无效", "请先输入正整数班次数。")
+                return
             self.current_text.delete("1.0", tk.END)
-            current = current_headcount_by_role(self.line)
+            current = {role: count * shifts
+                       for role, count in current_headcount_by_role(self.line).items()}
             if self._single_role:
                 self.current_text.insert("1.0", str(sum(current.values())))
             else:
@@ -2301,6 +2395,16 @@ class HrPlanningDialog:
         s = self.summary
         c = s["costs"]
         rows = []
+        rows.append({"category": "可行性", "item": "目标约束",
+                     "value": "可行" if s.get("feasible", True) else "不可行"})
+        for reason in s.get("constraints", []):
+            rows.append({"category": "约束", "item": reason, "value": "需处理"})
+        rows.append({"category": "编制", "item": "每班岗位人数",
+                     "value": f"{s.get('headcount_per_shift', s['total_headcount'])} 人/班"})
+        rows.append({"category": "编制", "item": "每班覆盖编制（含缺勤）",
+                     "value": f"{s['covered_headcount_per_shift']} 人/班"})
+        rows.append({"category": "编制", "item": "全天覆盖编制（含缺勤）",
+                     "value": f"{s['covered_headcount']} 人"})
         rows.append({
             "category": "计算口径",
             "item": f"目标日产量 {s['daily_target']:.0f} ÷ 有效工时 "
@@ -2312,22 +2416,28 @@ class HrPlanningDialog:
                 "category": "计算明细",
                 "item": (
                     f"{d['name']}{'（瓶颈）' if d['is_bottleneck'] else ''}："
-                    f"配置 {d['configured']} 人 / 单人产能 {d['per_head']}/h"
+                    f"配置 {d['configured']} 人 / 工序能力 {d['capacity']}/h"
                     f"（单件耗时 {d['process_time']}s × OEE {d['oee']} × "
                     f"效率 {d['efficiency']} × 切换{d['changeover_minutes']}min）"
                 ),
-                "value": f"需求 {d['needed']} 人",
+                "value": f"每班需求 {d['needed']} 人",
             })
         if self._single_role:
             rows.append({
-                "category": "人力需求（按目标反推）",
+                "category": "全日总编制",
                 "item": "通用（合计）",
                 "value": f"{s['total_headcount']} 人",
             })
         else:
             for role, count in s["headcount_by_role"].items():
                 rows.append({
-                    "category": "人力需求（按目标反推）",
+                    "category": "全日总编制",
+                    "item": role,
+                    "value": f"{count} 人",
+                })
+            for role, count in s["covered_headcount_by_role"].items():
+                rows.append({
+                    "category": "全天覆盖编制（含缺勤）",
                     "item": role,
                     "value": f"{count} 人",
                 })
@@ -2340,7 +2450,7 @@ class HrPlanningDialog:
             "value": f"{s['current_total']} 人",
         })
         rows.append({
-            "category": "招聘缺口", "item": "首周净缺口（需求−在岗−到岗）",
+            "category": "招聘缺口", "item": "初始缺口（覆盖编制−在岗）",
             "value": f"{s['initial_gap']} 人",
         })
         rows.append({
@@ -2349,7 +2459,7 @@ class HrPlanningDialog:
             "value": f"{s['one_time_hiring']} 人",
         })
         rows.append({
-            "category": "招聘缺口", "item": "富余人数（在岗−需求）",
+            "category": "招聘缺口", "item": "富余人数（在岗−覆盖编制）",
             "value": f"{s['excess_headcount']} 人",
         })
         rows += [
@@ -2359,7 +2469,9 @@ class HrPlanningDialog:
             {"category": "成本", "item": "月总成本", "value": f"{c['monthly_total']} 元"},
             {"category": "成本", "item": "单位人力成本",
              "value": f"{c['per_unit_labor_cost']} 元/单位"},
-            {"category": "达产", "item": "达产天数", "value": f"{s['days_to_full']} 天"},
+            {"category": "达产", "item": "覆盖编制达产天数",
+             "value": f"{s['days_to_full']} 天" if s['days_to_full'] is not None
+             else "无法达成 / 尚需到岗计划"},
         ]
         for week in s["weekly_gap"]:
             rows.append({
@@ -2387,18 +2499,26 @@ class HrPlanningDialog:
             f"每小时需求：{s['required_hourly']:.2f}",
             "",
             "【计算明细】",
-            "产能公式：3600÷单件耗时×人数×OEE×效率×(1−切换占比)",
+            "产能按工序模式计算；机台看台数，协同团队不按人数线性放大。",
+        ]
+        lines[0:0] = [
+            f"目标可行性：{'可行' if s.get('feasible', True) else '不可行'}",
+            *[f"约束：{reason}" for reason in s.get("constraints", [])],
+            f"每班岗位人数：{s.get('headcount_per_shift', s['total_headcount'])} 人/班；"
+            f"全日总编制：{s['total_headcount']} 人",
+            f"每班覆盖编制（含缺勤）：{s['covered_headcount_per_shift']} 人/班；"
+            f"全天覆盖编制（含缺勤）：{s['covered_headcount']} 人",
         ]
         lines += [
             f"  {d['name']}{'（瓶颈）' if d['is_bottleneck'] else ''}："
             f"单件耗时{d['process_time']}s×OEE{d['oee']}×效率{d['efficiency']}"
             f"×切换{d['changeover_minutes']}min → 产能 {d['capacity']}/h，"
-            f"单人 {d['per_head']}/h → 需求 {d['needed']} 人"
+            f"当前人均 {d['per_head']}/h（非扩编增益） → 每班需求 {d['needed']} 人"
             for d in s["station_derivation"]
         ]
         lines += [
             "",
-            "【人力需求（按目标反推，最低人数）】",
+            "【全日总编制（按目标反推，跨班人员不重复上岗）】",
         ]
         if self._single_role:
             lines.append(f"  通用（合计）：{s['total_headcount']} 人")
@@ -2407,6 +2527,9 @@ class HrPlanningDialog:
                 f"  {role}: {n} 人" for role, n in s["headcount_by_role"].items()
             ]
             lines.append(f"总人数：{s['total_headcount']} 人")
+        lines += ["", "【全天覆盖编制（含缺勤）】"]
+        lines += [f"  {role}: {count} 人"
+                  for role, count in s["covered_headcount_by_role"].items()]
         lines += [
             "",
             "【当前在岗（按产线配置）】",
@@ -2419,8 +2542,8 @@ class HrPlanningDialog:
             ]
         lines.append(
             f"在岗合计：{s['current_total']} 人　"
-            f"首周净缺口（需求−在岗−到岗）：{s['initial_gap']} 人　"
-            f"富余：{s['excess_headcount']} 人"
+            f"初始缺口（覆盖编制−在岗）：{s['initial_gap']} 人　"
+            f"富余（在岗−覆盖编制）：{s['excess_headcount']} 人"
         )
         lines += [
             "",
@@ -2443,7 +2566,8 @@ class HrPlanningDialog:
             "",
             f"【一次性招聘建议】{s['one_time_hiring']} 人"
             f"（按首周一次性补齐，之后无新增则无需重复招聘）",
-            f"【达产预测】约 {s['days_to_full']} 天达产",
+            f"【覆盖编制达产天数】约 {s['days_to_full']} 天" if s['days_to_full'] is not None
+            else "【覆盖编制达产天数】无法达成 / 尚需到岗计划，请检查约束和招聘计划",
         ]
 
         self.result_text.config(state=tk.NORMAL)
@@ -2499,8 +2623,8 @@ class HistoryDialog:
     KPI_LABELS = {
         "bottleneck_capacity": "瓶颈产能",
         "daily_output": "日产量",
-        "total_cost": "日成本",
-        "unit_cost": "单位成本",
+        "total_cost": "日人工成本",
+        "unit_cost": "实际单位人工成本",
         "balance_rate": "平衡率",
         "upph": "UPPH",
         "batch_cycle_min": "批次周期",
@@ -2586,7 +2710,7 @@ class HistoryDialog:
         self.tree.heading("time", text="时间")
         self.tree.heading("line", text="产线")
         self.tree.heading("daily", text="日产量")
-        self.tree.heading("unit_cost", text="单位成本")
+        self.tree.heading("unit_cost", text="实际单位人工成本")
         self.tree.heading("balance", text="平衡率")
         self.tree.heading("upph", text="UPPH")
         self.tree.column("time", width=140)
@@ -2801,13 +2925,14 @@ class SweepDialog:
 
     PARAM_LABELS = {
         "worker_count": "工人数",
+        "machine_count": "机台数量",
         "machine_takt": "机台节拍(秒)",
         "oee": "OEE",
         "shift_hours": "班次时长(小时)",
     }
     METRIC_LABELS = {
         "total_output": "总产出",
-        "unit_cost": "单位成本",
+        "unit_cost": "实际单位人工成本",
         "upph": "UPPH",
     }
 
@@ -2829,8 +2954,7 @@ class SweepDialog:
         self.dialog.wait_window()
 
     def _create_widgets(self) -> None:
-        main = ttk.Frame(self.dialog, padding=14)
-        main.pack(fill=tk.BOTH, expand=True)
+        main = scrollable_form(self.dialog, padding=14)
 
         ttk.Label(main, text="参数:").grid(row=0, column=0, sticky=tk.W, pady=4)
         self._param_label_to_key = {
@@ -2879,62 +3003,60 @@ class SweepDialog:
             main,
             text="每个取值运行一次仿真，如 1,2,3 表示试三个档位",
             foreground=COLORS["text_secondary"],
-        ).grid(row=2, column=2, sticky=tk.W, padx=(8, 0), pady=4)
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=4)
 
         ttk.Label(main, text="仿真时长(小时):").grid(
-            row=3, column=0, sticky=tk.W, pady=4
+            row=4, column=0, sticky=tk.W, pady=4
         )
         self.duration_var = tk.StringVar(
             value=str(self.line.shift_hours) if self.line else "8"
         )
         ttk.Entry(main, textvariable=self.duration_var, width=10).grid(
-            row=3, column=1, sticky=tk.W, pady=4
+            row=4, column=1, sticky=tk.W, pady=4
         )
 
-        ttk.Button(main, text="开始试算", command=self._run).grid(
-            row=4, column=0, columnspan=2, sticky=tk.W, pady=8
-        )
-        self.busy_bar = ttk.Progressbar(main, mode="indeterminate", length=150)
-        self.busy_bar.grid(row=4, column=2, sticky=tk.W)
-        self.busy_bar.grid_remove()
+        controls = ttk.Frame(main)
+        controls.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=8)
+        ttk.Button(controls, text="开始试算", command=self._run).pack(side=tk.LEFT)
+        self.busy_bar = ttk.Progressbar(controls, mode="indeterminate", length=120)
+        self.cancel_button = ttk.Button(controls, text="取消任务 / 关闭", command=self._close)
+        self.cancel_button.allow_while_busy = True
+        self.cancel_button.pack(side=tk.RIGHT, padx=4)
 
         columns = ("label", "output", "daily", "unit_cost", "upph")
         self.tree = ttk.Treeview(main, columns=columns, show="headings", height=10)
         self.tree.heading("label", text="参数")
         self.tree.heading("output", text="总产出")
         self.tree.heading("daily", text="日产量")
-        self.tree.heading("unit_cost", text="单位成本")
+        self.tree.heading("unit_cost", text="实际单位人工成本")
         self.tree.heading("upph", text="UPPH")
         for col, width in (("label", 140), ("output", 100), ("daily", 100),
                            ("unit_cost", 100), ("upph", 100)):
             self.tree.column(col, width=width, anchor=tk.E if col != "label" else tk.W)
-        self.tree.grid(row=5, column=0, columnspan=2, sticky=tk.NSEW, pady=(4, 0))
+        self.tree.grid(row=6, column=0, columnspan=2, sticky=tk.NSEW, pady=(4, 0))
 
         ttk.Label(main, text="图表指标:").grid(
-            row=6, column=0, sticky=tk.W, pady=8
+            row=7, column=0, sticky=tk.W, pady=8
         )
+        metric_controls = ttk.Frame(main)
+        metric_controls.grid(row=7, column=1, sticky=tk.EW, pady=8)
         self.metric_var = tk.StringVar(value=self.METRIC_LABELS["total_output"])
         self.metric_combo = ttk.Combobox(
-            main,
+            metric_controls,
             textvariable=self.metric_var,
             values=list(self.METRIC_LABELS.values()),
             state="readonly",
             width=16,
         )
-        self.metric_combo.grid(row=6, column=1, sticky=tk.W, pady=8)
+        self.metric_combo.pack(side=tk.LEFT)
         self.metric_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_chart())
-        ttk.Button(main, text="导出Excel", command=self._export_excel).grid(
-            row=6, column=2, sticky=tk.E, pady=8, padx=(8, 0)
+        ttk.Button(metric_controls, text="导出Excel", command=self._export_excel).pack(
+            side=tk.RIGHT, padx=4
         )
-        ttk.Button(main, text="关闭", command=self._close).grid(
-            row=6, column=3, sticky=tk.E, pady=8, padx=(8, 0)
-        )
-        main.rowconfigure(5, weight=1)
+        main.rowconfigure(6, weight=1)
         main.columnconfigure(1, weight=1)
-        main.columnconfigure(2, weight=0)
-        main.columnconfigure(3, weight=0)
         self.canvas = tk.Canvas(main, height=180, bg=COLORS['surface'], highlightthickness=1)
-        self.canvas.grid(row=8, column=0, columnspan=3, sticky=tk.NSEW, pady=(4, 0))
+        self.canvas.grid(row=9, column=0, columnspan=2, sticky=tk.NSEW, pady=(4, 0))
         HelpSection(
             main,
             "使用说明",
@@ -2948,7 +3070,7 @@ class SweepDialog:
             "仿真时长：每次仿真的模拟时长，默认取当前产线班次。\n"
             "图表指标：展示每次试算的结果指标（总产出/单位成本/UPPH），"
             "用于观察参数取值与结果的关系；导出 Excel 可进一步分析。",
-        ).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        ).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
     def _run(self) -> None:
         if getattr(self, "_job_running", False):
@@ -2972,6 +3094,8 @@ class SweepDialog:
             if not values:
                 messagebox.showwarning("警告", "请填写取值列表")
                 return
+            if len(values) > 100:
+                raise ValueError("一次最多试算 100 个取值")
             line = copy.deepcopy(self.line)
         except Exception as exc:
             messagebox.showerror("试算失败", str(exc))
@@ -2979,29 +3103,31 @@ class SweepDialog:
 
         self._job_running = True
         self._saved_states = set_dialog_busy(self.dialog, True)
-        self.busy_bar.grid()
+        self.busy_bar.pack(side=tk.LEFT, padx=8)
         self.busy_bar.start(10)
 
         def work(progress):
-            base = SimulationEngine(copy.deepcopy(line)).run_sync(
-                duration_hours=duration
+            baseline_engine = SimulationEngine(copy.deepcopy(line))
+            baseline_engine.random_seed = 42
+            base = baseline_engine.run_sync(
+                duration_hours=duration, cancel_event=progress.cancel_event
             )
             base_row = {
                 "label": "基线（当前）",
                 "total_output": base.total_output,
                 "daily_output": round(base.kpis.get("daily_output", 0.0), 1),
-                "unit_cost": base.kpis.get("unit_cost", 0.0),
+                "unit_cost": base.kpis.get("actual_unit_cost"),
                 "upph": base.kpis.get("upph", 0.0),
             }
             sweep_rows = run_sweep(
                 line, param, values,
-                station_id=station_id, duration_hours=duration,
+                station_id=station_id, duration_hours=duration, cancel_event=progress.cancel_event,
             )
             return [base_row] + sweep_rows
 
         def finish():
             self.busy_bar.stop()
-            self.busy_bar.grid_remove()
+            self.busy_bar.pack_forget()
             set_dialog_busy(self.dialog, False, self._saved_states)
             self._job_running = False
 
@@ -3015,7 +3141,7 @@ class SweepDialog:
                     row["label"],
                     row["total_output"],
                     row["daily_output"],
-                    round(row["unit_cost"], 3),
+                    format_cost(row["unit_cost"]),
                     round(row["upph"], 1),
                 ))
                 if index == 0:
@@ -3027,7 +3153,12 @@ class SweepDialog:
             finish()
             messagebox.showerror("试算失败", f"{exc}\n\n详细日志：logs/app.log")
 
-        BackgroundJob(self.dialog, work, success, error).start()
+        def cancelled():
+            finish()
+            self.dialog.destroy()
+
+        self._job = BackgroundJob(self.dialog, work, success, error, on_cancel=cancelled)
+        self._job.start()
 
     def _draw_chart(self) -> None:
         """批量试算折线图（V3.3）"""
@@ -3042,13 +3173,18 @@ class SweepDialog:
         )
         series = [row.get(metric, 0.0) for row in self.rows[1:]]
         base_value = self.rows[0].get(metric, 0.0)
-        values = series + [base_value]
+        values = [value for value in series + [base_value] if value is not None]
+        if not values:
+            self.canvas.create_text(300, 80, text="零产出：单位人工成本不可计算")
+            return
         vmin, vmax = min(values), max(values)
         span = (vmax - vmin) or 1.0
         width, height = 640, 180
         pad = 34
         points = []
         for i, value in enumerate(series):
+            if value is None:
+                continue
             x = pad + i * (width - 2 * pad) / max(len(series) - 1, 1)
             y = height - pad - (value - vmin) / span * (height - 2 * pad)
             points.append((x, y))
@@ -3056,16 +3192,17 @@ class SweepDialog:
             self.canvas.create_line(x1, y1, x2, y2, fill=COLORS['chart_primary'], width=2)
         for x, y in points:
             self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=COLORS['chart_primary'])
-        baseline_y = height - pad - (base_value - vmin) / span * (height - 2 * pad)
-        self.canvas.create_line(
-            pad, baseline_y, width - pad, baseline_y,
-            fill=COLORS['chart_reference'], dash=(4, 3),
-        )
+        if base_value is not None:
+            baseline_y = height - pad - (base_value - vmin) / span * (height - 2 * pad)
+            self.canvas.create_line(
+                pad, baseline_y, width - pad, baseline_y,
+                fill=COLORS['chart_reference'], dash=(4, 3),
+            )
         self.canvas.create_text(
             8, 6, anchor=tk.NW,
             text=(
                 f"{self.METRIC_LABELS.get(metric, metric)} 曲线"
-                f"（红虚线=基线 {base_value:.2f}）"
+                f"（基线 {format_cost(base_value, 2)}；不可计算值不绘制）"
             ),
             fill=COLORS['chart_text'],
         )
@@ -3078,6 +3215,9 @@ class SweepDialog:
         bottleneck = self.line.find_bottleneck() if self.line else None
         if param == "worker_count":
             n = bottleneck.worker_count if bottleneck else 1
+            self.values_var.set(f"{max(1, n - 1)},{n},{n + 1}")
+        elif param == "machine_count":
+            n = bottleneck.machine_count if bottleneck else 1
             self.values_var.set(f"{max(1, n - 1)},{n},{n + 1}")
         elif param == "machine_takt":
             takt = bottleneck.machine_takt if bottleneck and bottleneck.machine_takt else 2.0
@@ -3120,7 +3260,8 @@ class SweepDialog:
 
     def _close(self) -> None:
         if getattr(self, "_job_running", False):
-            messagebox.showinfo("正在试算", "请等待当前试算完成")
+            self._job.cancel()
+            self.cancel_button.config(state=tk.DISABLED, text="正在取消...")
             return
         self.dialog.destroy()
 
@@ -3133,7 +3274,7 @@ class OptimizeDialog:
     """
 
     OBJECTIVE_LABELS = {
-        "unit_cost": "单位成本最小",
+        "unit_cost": "实际单位人工成本最小",
         "output": "总产出最大",
     }
 
@@ -3142,9 +3283,11 @@ class OptimizeDialog:
         parent,
         production_line: Optional[ProductionLine],
         on_apply=None,
+        can_apply=None,
     ):
         self.line = production_line
         self.on_apply = on_apply
+        self.can_apply = can_apply
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("智能优化（遗传算法）")
         self.dialog.geometry("580x560")
@@ -3210,12 +3353,13 @@ class OptimizeDialog:
                 self.locked_listbox.insert(tk.END, f"{station.id} {station.name}")
         self.locked_listbox.grid(row=4, column=1, sticky=tk.W, pady=5)
 
-        ttk.Button(main, text="开始优化", command=self._run).grid(
-            row=5, column=0, columnspan=2, sticky=tk.W, pady=10
-        )
-        self.busy_bar = ttk.Progressbar(main, mode="indeterminate", length=150)
-        self.busy_bar.grid(row=5, column=2, sticky=tk.W)
-        self.busy_bar.grid_remove()
+        controls = ttk.Frame(main)
+        controls.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        ttk.Button(controls, text="开始优化", command=self._run).pack(side=tk.LEFT)
+        self.busy_bar = ttk.Progressbar(controls, mode="indeterminate", length=120)
+        self.cancel_button = ttk.Button(controls, text="取消任务 / 关闭", command=self._close)
+        self.cancel_button.allow_while_busy = True
+        self.cancel_button.pack(side=tk.RIGHT, padx=4)
         self.progress_var = tk.StringVar(value="")
         ttk.Label(main, textvariable=self.progress_var).grid(
             row=6, column=0, columnspan=2, sticky=tk.W
@@ -3238,8 +3382,8 @@ class OptimizeDialog:
             "每代计算越慢。总仿真次数 ≈ 种群 × 代数。\n"
             "锁定工序：在列表中选中工序（可多选）后，该工序参数保持当前值"
             "不参与搜索，适合固定设备/不可变工位。\n"
-            "结果口径：理论单位成本=人力成本÷理论日产量；"
-            "实际单位成本=总成本÷本次仿真产出。\n"
+            "结果口径：理论单位人工成本=预计日人工÷理论日产量；"
+            "实际单位人工成本=本次人工费用÷末端良品，零产出不可计算。\n"
             "方案运用：在结果表选中某个 TOP 方案，点「应用选中方案」，"
             "该方案的人数/缓冲区/节拍会写入当前产线并刷新主界面，"
             "之后可保存方案或继续仿真验证。",
@@ -3254,36 +3398,37 @@ class OptimizeDialog:
             )
             generations = int(self.generations_var.get())
             population = int(self.population_var.get())
+            if not 1 <= generations <= 100 or not 2 <= population <= 100:
+                raise ValueError("迭代代数需在 1–100，种群大小需在 2–100")
             duration = float(self.duration_var.get())
             locked = [
                 self.locked_listbox.get(index).split(" ")[0]
                 for index in self.locked_listbox.curselection()
             ]
             line = copy.deepcopy(self.line)
+            self._result_revision = self.line.configuration_revision()
         except Exception as exc:
             messagebox.showerror("优化失败", str(exc))
             return
 
         self._job_running = True
         self._saved_states = set_dialog_busy(self.dialog, True)
-        self.busy_bar.grid()
+        self.busy_bar.pack(side=tk.LEFT, padx=8)
         self.busy_bar.start(10)
         self.progress_var.set("正在计算基线...")
 
         def work(progress):
-            base = SimulationEngine(copy.deepcopy(line)).run_sync(
-                duration_hours=duration
+            baseline_engine = SimulationEngine(copy.deepcopy(line))
+            baseline_engine.random_seed = 42
+            base = baseline_engine.run_sync(
+                duration_hours=duration, cancel_event=progress.cancel_event
             )
             base_row = {
                 "rank": "基线",
                 "output": base.total_output,
-                "unit_cost": round(base.kpis.get("unit_cost", 0.0), 3),
-                "actual_unit_cost": round(
-                    base.kpis.get("total_cost", 0.0) / base.total_output
-                    if base.total_output > 0 else 0.0,
-                    3,
-                ),
-                "total_cost": round(base.kpis.get("total_cost", 0.0), 1),
+                "unit_cost": format_cost(base.kpis.get("unit_cost")),
+                "actual_unit_cost": format_cost(base.kpis.get("actual_unit_cost")),
+                "total_cost": format_cost(base.kpis.get("actual_labor_cost"), 1),
                 "params": "当前配置",
             }
 
@@ -3298,12 +3443,13 @@ class OptimizeDialog:
                 duration_hours=duration,
                 locked_stations=locked,
                 progress_callback=_progress,
+                cancel_event=progress.cancel_event,
             )
             return base_row, top
 
         def finish():
             self.busy_bar.stop()
-            self.busy_bar.grid_remove()
+            self.busy_bar.pack_forget()
             set_dialog_busy(self.dialog, False, self._saved_states)
             self._job_running = False
 
@@ -3320,17 +3466,17 @@ class OptimizeDialog:
                 rows.append({
                     "rank": f"TOP{s['rank']}",
                     "output": s["total_output"],
-                    "unit_cost": round(s["unit_cost"], 3),
-                    "actual_unit_cost": round(s["actual_unit_cost"], 3),
-                    "total_cost": round(s["total_cost"], 1),
+                    "unit_cost": format_cost(s.get("theoretical_unit_cost")),
+                    "actual_unit_cost": format_cost(s["actual_unit_cost"]),
+                    "total_cost": format_cost(s["total_cost"], 1),
                     "params": _params_text(s["params"]),
                 })
             columns = [
                 ("rank", "方案", 60, tk.CENTER),
                 ("output", "总产出", 90, tk.E),
-                ("unit_cost", "理论单位成本", 110, tk.E),
-                ("actual_unit_cost", "实际单位成本", 110, tk.E),
-                ("total_cost", "总成本", 90, tk.E),
+                ("unit_cost", "理论单位人工成本", 130, tk.E),
+                ("actual_unit_cost", "实际单位人工成本", 130, tk.E),
+                ("total_cost", "本次人工成本", 110, tk.E),
                 ("params", "参数", 420, tk.W),
             ]
             dialog = ResultTableDialog(
@@ -3340,7 +3486,7 @@ class OptimizeDialog:
                 rows,
                 highlight_key="rank",
                 highlight_value="基线",
-                actions=[("应用选中方案", lambda: self._apply_selected(dialog))],
+                actions=[("应用选中方案", self._apply_selected)],
             )
             self.progress_var.set("优化完成")
 
@@ -3348,13 +3494,25 @@ class OptimizeDialog:
             finish()
             messagebox.showerror("优化失败", f"{exc}\n\n详细日志：logs/app.log")
 
-        BackgroundJob(
+        def cancelled():
+            finish()
+            self.dialog.destroy()
+
+        self._job = BackgroundJob(
             self.dialog, work, success, error,
             on_progress=lambda value: self.progress_var.set(value),
-        ).start()
+            on_cancel=cancelled,
+        )
+        self._job.start()
 
     def _apply_selected(self, dialog) -> None:
         """把选中的 TOP 方案应用到当前产线（V3.3.1）"""
+        can_apply = getattr(self, "can_apply", None)
+        if can_apply is not None and not can_apply():
+            return
+        if self.line.configuration_revision() != self._result_revision:
+            messagebox.showwarning("结果已过期", "配置已变化，请重新优化。")
+            return
         row = dialog.get_selected_row()
         if row is None:
             messagebox.showwarning("提示", "请先在结果表选中一个方案")
@@ -3370,7 +3528,7 @@ class OptimizeDialog:
         if entry is None:
             return
         for station in self.line.stations:
-            params = entry["params"].get(station.name)
+            params = entry["params"].get(station.id)
             if not params:
                 continue
             station.worker_count = params["worker_count"]
@@ -3379,6 +3537,7 @@ class OptimizeDialog:
                 station.machine_takt = params["machine_takt"]
         if self.on_apply:
             self.on_apply()
+        dialog._close()
         messagebox.showinfo(
             "已应用",
             f"已应用「{rank}」到当前产线，主界面工序配置已刷新；"
@@ -3387,7 +3546,8 @@ class OptimizeDialog:
 
     def _close(self) -> None:
         if getattr(self, "_job_running", False):
-            messagebox.showinfo("正在优化", "请等待当前优化完成")
+            self._job.cancel()
+            self.cancel_button.config(state=tk.DISABLED, text="正在取消...")
             return
         self.dialog.destroy()
 
@@ -3475,6 +3635,7 @@ class ResultTableDialog:
         self.highlight_value = highlight_value
         self.actions = actions or []
         self.help_text = help_text
+        self._parent_dialog = parent
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
@@ -3483,6 +3644,8 @@ class ResultTableDialog:
         self.dialog.grab_set()
         self._create_widgets()
         self.dialog.bind('<Escape>', lambda e: self._close())
+        self.dialog.protocol("WM_DELETE_WINDOW", self._close)
+        self.dialog.after_idle(self.tree.focus_set)
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
         y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
@@ -3502,7 +3665,8 @@ class ResultTableDialog:
             side=tk.LEFT, padx=4
         )
         for label, callback in self.actions:
-            ttk.Button(btn_frame, text=label, command=callback).pack(
+            ttk.Button(btn_frame, text=label,
+                       command=lambda callback=callback: callback(self)).pack(
                 side=tk.LEFT, padx=4
             )
         ttk.Button(btn_frame, text="关闭", command=self._close).pack(
@@ -3510,11 +3674,18 @@ class ResultTableDialog:
         )
 
         keys = [c[0] for c in self.columns]
-        self.tree = ttk.Treeview(main, columns=keys, show="headings", height=16)
+        tree_frame = ttk.Frame(main)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.tree = ttk.Treeview(tree_frame, columns=keys, show="headings", height=16)
         for key, label, width, anchor in self.columns:
             self.tree.heading(key, text=label)
             self.tree.column(key, width=width, anchor=anchor)
-        self.tree.pack(fill=tk.BOTH, expand=True)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        horizontal = ttk.Scrollbar(main, orient=tk.HORIZONTAL, command=self.tree.xview)
+        horizontal.pack(fill=tk.X)
+        self.tree.configure(yscrollcommand=tree_scroll.set, xscrollcommand=horizontal.set)
 
         if self.help_text:
             HelpSection(self.dialog, "结果说明", self.help_text).pack(
@@ -3531,12 +3702,20 @@ class ResultTableDialog:
             if is_baseline:
                 self.tree.item(item, tags=("baseline",))
         self.tree.tag_configure("baseline", background=COLORS['chart_baseline'])
+        items = self.tree.get_children()
+        if items:
+            self.tree.selection_set(items[0])
+            self.tree.focus(items[0])
+            self.tree.see(items[0])
+        self.tree.focus_set()
 
     def get_selected_row(self):
         """返回当前选中行（V3.3.1）"""
-        if self.selected_index is None or not (0 <= self.selected_index < len(self.rows)):
+        selection = self.tree.selection()
+        if not selection:
             return None
-        return self.rows[self.selected_index]
+        index = self.tree.index(selection[0])
+        return self.rows[index] if 0 <= index < len(self.rows) else None
 
     def _export_excel(self) -> None:
         try:
@@ -3570,6 +3749,8 @@ class ResultTableDialog:
 
     def _close(self) -> None:
         self.dialog.destroy()
+        if isinstance(self._parent_dialog, tk.Toplevel) and self._parent_dialog.winfo_exists():
+            self._parent_dialog.grab_set()
 
 
 class HelpDialog:
@@ -3689,7 +3870,7 @@ class ChangeoverDialog:
         self.result: Optional[Dict[str, Any]] = None
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("停机切换（换型）")
-        self.dialog.geometry("480x330")
+        self.dialog.geometry("520x350")
         self.dialog.transient(parent)
         self.dialog.grab_set()
         self._create_widgets()
@@ -3734,12 +3915,12 @@ class ChangeoverDialog:
         )
         ttk.Label(
             main,
-            text="默认取所选工序的切换时间",
+            text="当前加工完成后开始换型；暂停时需先恢复仿真。",
             foreground=COLORS["text_secondary"],
-        ).grid(row=1, column=2, sticky=tk.W, padx=(8, 0), pady=5)
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=5)
 
-        ttk.Button(main, text="确认停机切换", command=self._confirm).grid(
-            row=2, column=0, columnspan=2, sticky=tk.W, pady=10
+        ttk.Button(main, text="提交换型请求", command=self._confirm).grid(
+            row=3, column=0, columnspan=2, sticky=tk.W, pady=10
         )
         HelpSection(
             main,
@@ -3747,8 +3928,10 @@ class ChangeoverDialog:
             "作用：仿真运行中模拟一次换型停机（如更换口味/规格/配方），"
             "观察对上下游与产出的影响。\n"
             "选择工序：下拉已列出全部工序（ID+名称），无需在画布或"
-            "工序列表中寻找；确认后该工序会在画布上高亮。",
-        ).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+            "工序列表中寻找；确认后该工序会在画布上高亮。\n"
+            "确认只提交请求；当前加工完成后开始换型，不中断在制品。"
+            "空闲工序会立即换型，暂停状态下需恢复仿真后执行。",
+        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
     def _confirm(self) -> None:
         text = self.station_var.get()
@@ -3756,12 +3939,15 @@ class ChangeoverDialog:
             messagebox.showwarning("警告", "请先选择工序")
             return
         try:
-            minutes = int(float(self.minutes_var.get()))
-        except ValueError:
-            messagebox.showerror("错误", "停机时长必须是整数分钟")
+            value = float(self.minutes_var.get())
+            if not math.isfinite(value) or not value.is_integer():
+                raise ValueError("not an integer")
+            minutes = int(value)
+        except (TypeError, ValueError, OverflowError):
+            messagebox.showerror("错误", "停机时长必须是整数分钟", parent=self.dialog)
             return
         if minutes <= 0:
-            messagebox.showerror("错误", "停机时长必须大于 0")
+            messagebox.showerror("错误", "停机时长必须大于 0", parent=self.dialog)
             return
         self.result = {
             "station_id": text.split(" ")[0],
@@ -3929,10 +4115,11 @@ class WizardDialog:
             "complex": "8 工序贴近真实参数，适合正式评估",
             "blank": "从零手动添加，适合已有明确配置",
         }
+        self._template_radios = {}
         for key, label in [
             ("simple", "简单产线（3 工序）"),
             ("standard", "标准产线（5 工序）"),
-            ("complex", "复杂产线（8 工序，真实参数）"),
+            ("complex", "复杂产线（8 工序示例）"),
             ("blank", "空白产线（手动添加）"),
         ]:
             radio = ttk.Radiobutton(
@@ -3942,6 +4129,7 @@ class WizardDialog:
                 value=key,
             )
             radio.pack(anchor=tk.W, pady=3)
+            self._template_radios[key] = radio
             ToolTip(radio, template_hints[key])
         ttk.Button(
             self.page_template,
@@ -4024,6 +4212,9 @@ class WizardDialog:
             self.production_line = line
             self.excel_imported = True
             self.excel_path_var.set(path)
+            self.shift_hours_var.set(str(line.shift_hours))
+            self.break_minutes_var.set(str(line.break_minutes))
+            self.wage_var.set(str(line.worker_hourly_wage))
             self.excel_label.config(text=f"已导入：{path}（{len(line.stations)} 个工序）", foreground="green")
             # 同步第 1 步的选择状态，避免界面与实际产线不一致
             type_keys = {
@@ -4066,6 +4257,19 @@ class WizardDialog:
             return
         self._last_template = self.template_var.get()
         self._last_production_type = self.production_type_var.get()
+        if hasattr(self, '_template_radios'):
+            is_assembly = self.production_type_var.get() == 'assembly'
+            for key, radio in self._template_radios.items():
+                radio.config(state=tk.NORMAL if is_assembly or key in ('standard', 'blank')
+                             else tk.DISABLED)
+            self._template_radios['standard'].config(
+                text='标准产线（5 工序）' if is_assembly else '内置模板（3 工序）'
+            )
+            if not is_assembly and self.template_var.get() not in ('standard', 'blank'):
+                self._loading_template_var = True
+                self.template_var.set('standard')
+                self._last_template = 'standard'
+                self._loading_template_var = False
         self.excel_imported = False
         self.production_line = None
         if hasattr(self, "excel_label"):
@@ -4074,6 +4278,8 @@ class WizardDialog:
     def _make_template_line(self) -> ProductionLine:
         """根据所选模板创建产线"""
         production_type = self.production_type_var.get()
+        if self.template_var.get() == 'blank':
+            return ProductionLine('新产线', production_type=ProductionType(production_type))
         if production_type == "liquid_filling":
             return create_liquid_line()
         if production_type == "pouch_packaging":
@@ -4099,6 +4305,19 @@ class WizardDialog:
         if self.production_line is None:
             self.production_line = self._make_template_line()
         line = self.production_line
+        try:
+            shift_hours, break_minutes, wage = parse_shift_params(
+                self.shift_hours_var.get(), self.break_minutes_var.get(), self.wage_var.get()
+            )
+        except ValueError as exc:
+            self.summary_text.config(state=tk.NORMAL)
+            self.summary_text.delete('1.0', tk.END)
+            self.summary_text.insert('1.0', f'班次参数需修正：{exc}\n请返回上一步修改。')
+            self.summary_text.config(state=tk.DISABLED)
+            return
+        line.shift_hours = shift_hours
+        line.break_minutes = break_minutes
+        line.worker_hourly_wage = wage
         summary = (
             f"产线名称：{line.name}\n"
             f"工序数量：{len(line.stations)}\n"
@@ -4124,6 +4343,13 @@ class WizardDialog:
             # 进入步骤 3 前确保产线已就绪
             if self.step_index == 1 and self.production_line is None:
                 self.production_line = self._make_template_line()
+            if self.step_index == 2:
+                try:
+                    parse_shift_params(self.shift_hours_var.get(), self.break_minutes_var.get(),
+                                       self.wage_var.get())
+                except ValueError as exc:
+                    messagebox.showerror("参数错误", str(exc))
+                    return
             self._show_step(self.step_index + 1)
             return
 
