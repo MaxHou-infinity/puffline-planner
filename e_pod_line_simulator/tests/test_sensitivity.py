@@ -128,9 +128,9 @@ def test_machine_sensitivity_changes_machine_count_not_people():
 
 def test_liquid_and_cancellation_do_not_produce_recommendations():
     line = ProductionLine('烟油', production_type=ProductionType.LIQUID_FILLING)
-    with pytest.raises(ValueError, match='烟油'):
+    with pytest.raises(ValueError, match='液体批次'):
         run_sensitivity(line)
-    with pytest.raises(ValueError, match='烟油'):
+    with pytest.raises(ValueError, match='液体批次'):
         run_sweep(line, 'worker_count', [1])
     event = threading.Event()
     event.set()

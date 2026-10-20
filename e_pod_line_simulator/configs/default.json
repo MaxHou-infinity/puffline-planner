@@ -1,18 +1,18 @@
 {
-  "name": "电子烟产线_标准版",
+  "name": "通用硬件装配演示线",
   "shift_hours": 8,
   "break_minutes": 60,
   "worker_hourly_wage": 20.0,
   "stations": [
     {
       "id": "s01",
-      "name": "注油",
+      "name": "零件装配",
       "process_time": 25,
       "worker_count": 2,
       "collaboration_type": "parallel",
       "oee": 0.85,
       "efficiency": 0.95,
-      "changeover_time": 45,
+      "changeover_time": 0,
       "buffer_capacity": 100,
       "current_status": "idle",
       "wip_count": 0,
@@ -24,9 +24,9 @@
       "process_time": 30,
       "worker_count": 3,
       "collaboration_type": "parallel",
-      "oee": 0.90,
+      "oee": 0.9,
       "efficiency": 0.95,
-      "changeover_time": 45,
+      "changeover_time": 0,
       "buffer_capacity": 100,
       "current_status": "idle",
       "wip_count": 0,
@@ -34,7 +34,7 @@
     },
     {
       "id": "s03",
-      "name": "棉芯安装",
+      "name": "功能测试",
       "process_time": 20,
       "worker_count": 2,
       "collaboration_type": "collaborative",
@@ -74,5 +74,6 @@
       "wip_count": 0,
       "total_output": 0
     }
-  ]
+  ],
+  "output_unit": "件"
 }

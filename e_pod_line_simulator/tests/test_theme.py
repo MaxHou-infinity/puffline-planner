@@ -4,7 +4,7 @@ import src.theme as theme
 
 
 def test_design_tokens_exist():
-    assert theme.COLORS['primary'] == '#2F6FED'
+    assert theme.COLORS['primary'] == '#285DE5'
     assert theme.SPACING['md'] == 12
     assert theme.resolve_font_family()
 
@@ -44,7 +44,7 @@ def test_design_tokens_2_0():
     assert theme.SHADOW['card'] == (0, 1, 2)
     assert theme.MOTION['normal'] == 180
     assert 'light' in theme.THEMES and 'dark' not in theme.THEMES
-    assert theme.THEMES['light']['bg'] == '#F5F6F8'
+    assert theme.THEMES['light']['bg'] == '#F4F6F9'
 
 
 def test_status_palette():

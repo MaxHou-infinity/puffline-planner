@@ -101,3 +101,10 @@ Windows and macOS release packages are also built by
   over historical documentation.
 - Keep user-facing responses in Chinese unless the user asks otherwise.
 - Verify the requested scope before editing; do not modify unrelated files.
+
+## Active Development Roadmap
+
+- v3.5.0 scope, implementation status, validation and handoff: `docs/roadmap-v3.5.0.md`.
+- Read that roadmap before continuing this version. Update its checklist and dated
+  process log after each implementation or verification stage; keep incomplete
+  validation and deferred capabilities explicit.

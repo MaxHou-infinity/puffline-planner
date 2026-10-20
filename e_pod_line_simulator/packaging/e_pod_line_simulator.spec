@@ -9,7 +9,7 @@ PyInstaller 打包配置（V3.2 P2）
 import os
 import re
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 with open(os.path.join(ROOT, "src", "version.py"), encoding="utf-8") as version_file:
@@ -24,8 +24,11 @@ datas = [
     (os.path.join(ROOT, "configs"), "configs"),
 ]
 
+datas += collect_data_files("ttkbootstrap")
+
 hiddenimports = (
-    collect_submodules("simpy")
+    collect_submodules("ttkbootstrap")
+    + collect_submodules("simpy")
     + collect_submodules("pandas")
     + collect_submodules("openpyxl")
     + collect_submodules("reportlab")

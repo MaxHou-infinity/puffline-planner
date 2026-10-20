@@ -508,3 +508,24 @@ def test_hr_form_accepts_break_value_from_saved_configuration(monkeypatch, break
     assert dialog._compute()
     assert not errors
     assert dialog.summary['headcount_per_shift'] > 0
+
+
+@pytest.mark.parametrize('value,expected,dirty', [
+    ('台', '台', True), (None, '件', False), ('a b', '件', False),
+])
+def test_output_unit_edit_validates_and_invalidates_results(window, monkeypatch,
+                                                           value, expected, dirty):
+    from tkinter import simpledialog
+    monkeypatch.setattr(simpledialog, 'askstring', lambda *args, **kwargs: value)
+    window._configure_output_unit()
+    assert window.production_line.get_unit() == expected
+    assert window._dirty == dirty
+
+
+def test_output_unit_cannot_change_during_running_simulation(window, monkeypatch):
+    from tkinter import simpledialog
+    window.simulation_engine = NS(is_running=True, is_paused=False)
+    monkeypatch.setattr(simpledialog, 'askstring',
+                        lambda *args, **kwargs: pytest.fail('运行中不应打开单位编辑器'))
+    window._configure_output_unit()
+    assert window.production_line.get_unit() == '件'

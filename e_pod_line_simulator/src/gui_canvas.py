@@ -24,7 +24,7 @@ from src.theme import COLORS, STATUS_LABELS, STATUS_SYMBOLS, status_soft, resolv
 
 def format_capacity_text(capacity: float, unit: str) -> str:
     """产能文本（单位动态，V3.3 修复写死'颗'的问题）"""
-    return f"⚡ {capacity:.0f} {unit}/h"
+    return f"{capacity:.0f} {unit}/h"
 
 
 def compute_reorder_order(
@@ -345,9 +345,9 @@ class CanvasView(tk.Canvas):
             return
         family = resolve_font_family()
         label_map = {
-            "assembly": "类型：烟弹组装",
-            "liquid_filling": "类型：烟油灌装（罐→灌装→QC）",
-            "pouch_packaging": "类型：尼古丁袋高速包装",
+            "assembly": "类型：通用离散装配",
+            "liquid_filling": "类型：液体批次（配方与储罐近似）",
+            "pouch_packaging": "类型：机台包装",
         }
         text = label_map.get(self.production_line.production_type.value, "")
         self.type_badge_id = self.create_text(
@@ -428,24 +428,14 @@ class CanvasView(tk.Canvas):
         soft_color = status_soft(station.current_status)
         family = resolve_font_family()
 
-        # 节点阴影（偏移浅色描边，模拟弱阴影）
-        _round_rect(
-            self,
-            rect_x1 + 2, rect_y1 + 3, rect_x2 + 2, rect_y2 + 3,
-            radius=10,
-            fill=COLORS['border'],
-            outline='',
-            tags=(f"station_{station.id}", "station"),
-        )
-
         # 节点卡片：浅色填充 + 圆角 + 边框
         card_id = _round_rect(
             self,
             rect_x1, rect_y1, rect_x2, rect_y2,
             radius=10,
-            fill=soft_color,
+            fill=COLORS['surface'],
             outline=COLORS['border'],
-            width=1.5,
+            width=1,
             tags=(f"station_{station.id}", "station"),
         )
         self.station_rects[station.id] = card_id
@@ -485,7 +475,7 @@ class CanvasView(tk.Canvas):
         # 工人数量（第二行）
         text_id2 = self.create_text(
             x, y - 4,
-            text=f"👥 {station.worker_count}人",
+            text=f"{station.worker_count} 人",
             font=(family, 10),
             fill=COLORS['text'],
             tags=(f"station_{station.id}", "station")
@@ -509,7 +499,7 @@ class CanvasView(tk.Canvas):
             utilization = station.get_utilization(self._bottleneck_capacity)
             text_id4 = self.create_text(
                 x, y + 35,
-                text=f"📊 {utilization:.0%}",
+                text=f"能力指数 {utilization:.0%}",
                 font=(family, 10),
                 fill=COLORS['text'],
                 tags=(f"station_{station.id}", "station")
@@ -522,7 +512,7 @@ class CanvasView(tk.Canvas):
         if self._bottleneck_id == station.id:
             badge_id = self.create_oval(
                 rect_x2 - 18, rect_y1 + 18, rect_x2 - 4, rect_y1 + 32,
-                fill=COLORS['danger_dark'],
+                fill=COLORS['warning'],
                 outline='',
                 tags=(f"station_{station.id}", "station"),
             )
@@ -775,7 +765,7 @@ class CanvasView(tk.Canvas):
                 self.itemconfig(
                     self.station_cards[station.id],
                     outline=COLORS['border'],
-                    width=1.5,
+                    width=1,
                 )
 
         # 高亮指定工序
@@ -932,9 +922,8 @@ class CanvasView(tk.Canvas):
         spacing = 40
         color = COLORS['grid']
         for x in range(0, width, spacing):
-            self.create_line(x, 0, x, height, fill=color, tags=("grid",))
-        for y in range(0, height, spacing):
-            self.create_line(0, y, width, y, fill=color, tags=("grid",))
+            for y in range(0, height, spacing):
+                self.create_oval(x, y, x + 1, y + 1, fill=color, outline='', tags=("grid",))
 
     def _on_right_click(self, event: tk.Event) -> None:
         """右键菜单：弹出工序操作菜单"""

@@ -148,7 +148,7 @@ def test_search_and_stochastic_simulation_seeds_are_reproducible():
 def test_liquid_optimization_and_cancel_are_explicit():
     line = make_line()
     line.production_type = ProductionType.LIQUID_FILLING
-    with pytest.raises(ValueError, match='烟油'):
+    with pytest.raises(ValueError, match='液体批次'):
         optimize(line)
     event = threading.Event()
     event.set()

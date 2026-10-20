@@ -162,7 +162,7 @@ def test_create_and_import_excel_template(tmp_path):
     line, error = import_from_excel(path)
     assert line is not None and error is None
     assert len(line.stations) == 4
-    assert line.stations[0].name == "注油"
+    assert line.stations[0].name == "零件装配"
 
 
 def test_create_and_import_liquid_template(tmp_path):
@@ -172,7 +172,7 @@ def test_create_and_import_liquid_template(tmp_path):
     assert line is not None and error is None
     assert line.production_type == ProductionType.LIQUID_FILLING
     assert len(line.recipes) == 1
-    assert line.recipes[0].name == "经典烟草"
+    assert line.recipes[0].name == "配方A"
     assert len(line.tanks) == 2
     assert len(line.batches) == 1
 
@@ -209,7 +209,7 @@ def test_import_excel_new_fields_and_line_config(tmp_path):
     assert line.cip_interval_batches == 2
     assert line.cip_interval_hours == 1.0
     assert len(line.materials) == 1
-    assert line.inventory.get("棉芯") == 1000
+    assert line.inventory.get("组件A") == 1000
     assert len(line.material_arrivals) == 1
 
 

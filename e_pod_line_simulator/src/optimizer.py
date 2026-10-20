@@ -31,7 +31,8 @@ def _gene_bounds(station) -> Dict[str, tuple]:
     }
     if station.machine_takt:
         bounds[GENE_TAKT] = (
-            min(0.5, station.machine_takt), max(0.5, round(station.machine_takt * 1.5, 2))
+            station.min_machine_takt or station.machine_takt,
+            max(station.machine_takt, round(station.machine_takt * 1.5, 2))
         )
     return bounds
 
@@ -216,8 +217,12 @@ def optimize(
     params 以工序 ID 为键；零良品不构成低成本方案，全不可行时抛 ValueError。
     cancel_event: 可选 threading.Event，取消时抛 CancelledError。
     """
+    from src.utils import validate_production_line
+    valid, error = validate_production_line(line)
+    if not valid:
+        raise ValueError(error)
     if line.production_type == ProductionType.LIQUID_FILLING:
-        raise ValueError('烟油采用配方批次模型，暂不支持工序人数/节拍遗传优化')
+        raise ValueError('液体批次采用配方批次模型，暂不支持工序人数/节拍遗传优化')
     if objective not in ('unit_cost', 'output'):
         raise ValueError('优化目标必须为 unit_cost 或 output')
     if population < 1 or generations < 1 or top_n < 1:

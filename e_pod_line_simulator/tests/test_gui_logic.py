@@ -243,13 +243,15 @@ def test_build_result_rows_keeps_all_rows():
 def test_canvas_capacity_text_uses_dynamic_unit():
     from src.gui_canvas import format_capacity_text
 
-    assert format_capacity_text(100, "袋") == "⚡ 100 袋/h"
-    assert format_capacity_text(100, "千克") == "⚡ 100 千克/h"
-    assert format_capacity_text(100, "颗") == "⚡ 100 颗/h"
+    assert format_capacity_text(100, "袋") == "100 袋/h"
+    assert format_capacity_text(100, "千克") == "100 千克/h"
+    assert format_capacity_text(100, "颗") == "100 颗/h"
 
 
 def test_station_edit_fields_mapping():
-    assert station_edit_fields(ProductionType.ASSEMBLY) == set()
+    assert station_edit_fields(ProductionType.ASSEMBLY) == {
+        "machine_takt", "job_role", "sampling_rate", "defect_rate", "rework_minutes",
+    }
     assert station_edit_fields(ProductionType.LIQUID_FILLING) == {
         "clean_time_minutes",
         "job_role",

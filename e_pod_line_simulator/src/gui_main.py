@@ -218,11 +218,19 @@ class MainWindow:
         4. 最右侧：报警栏（纵列显示）
         """
         # 创建主容器（使用PanedWindow实现可调整大小的分割）
-        self.root.rowconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=0)
+        self.root.rowconfigure(0, weight=0)
+        self.root.rowconfigure(1, weight=1)
+        self.root.rowconfigure(2, weight=0)
         self.root.columnconfigure(0, weight=1)
+        header = ttk.Frame(self.root, padding=(20, 16))
+        header.grid(row=0, column=0, sticky='ew')
+        self.project_title = ttk.Label(header, text="PuffLine Planner", style="Heading.TLabel")
+        self.project_title.pack(anchor=tk.W)
+        self.project_subtitle = ttk.Label(
+            header, text="本地产线仿真与人力规划", foreground=COLORS['text_secondary'])
+        self.project_subtitle.pack(anchor=tk.W, pady=(5, 0))
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_paned.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        main_paned.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
         self.main_paned = main_paned
         
         # 左侧：配置面板（加宽以完整显示工序列表）
@@ -369,6 +377,9 @@ class MainWindow:
         speed_combo.pack(side=tk.LEFT)
         self.speed_combo = speed_combo
         
+        self.btn_output_unit = ttk.Button(
+            action_frame, text="产出单位", command=self._configure_output_unit)
+        self.btn_output_unit.pack(side=tk.LEFT, padx=3)
         # 班次配置按钮
         self.btn_config_shift = ttk.Button(action_frame, text="班次配置", command=self._btn_config_shift)
         self.btn_config_shift.pack(side=tk.LEFT, padx=5)
@@ -390,6 +401,20 @@ class MainWindow:
         ToolTip(self.btn_save_scenario, "保存当前产线配置为方案")
         ToolTip(self.speed_combo, "仿真速度倍数（1x-64x）")
         
+        actions = [self.btn_changeover, self.btn_output_unit,
+                   self.btn_config_shift, self.btn_save_scenario]
+
+        def reflow_actions(event):
+            columns = 4 if event.width >= 680 else 2
+            for button in actions:
+                button.pack_forget()
+            for index, button in enumerate(actions):
+                button.grid(row=index // columns, column=index % columns,
+                            sticky='ew', padx=3, pady=3)
+            for column in range(4):
+                action_frame.columnconfigure(column, weight=1 if column < columns else 0)
+        action_frame.bind('<Configure>', reflow_actions)
+
         # 报警面板（右侧纵列）
         self.alert_panel = AlertPanel(alert_frame)
         self.alert_panel.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -401,14 +426,14 @@ class MainWindow:
         状态栏显示程序运行状态和提示信息
         """
         status_frame = ttk.Frame(self.root)
-        status_frame.grid(row=1, column=0, sticky="ew")
-        self.status_bar = ttk.Label(status_frame, text="就绪", relief=tk.SUNKEN, anchor=tk.W)
+        status_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=8)
+        self.status_bar = ttk.Label(status_frame, text="就绪", relief=tk.FLAT, anchor=tk.W)
         self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.analysis_progress = ttk.Progressbar(status_frame, mode="indeterminate", length=120)
         self.btn_cancel_analysis = ttk.Button(
             status_frame, text="取消分析", command=self._cancel_analysis
         )
-        self.status_meta = ttk.Label(status_frame, text="", relief=tk.SUNKEN, anchor=tk.E)
+        self.status_meta = ttk.Label(status_frame, text="", relief=tk.FLAT, anchor=tk.E)
         self.status_meta.pack(side=tk.RIGHT, padx=(4, 0))
 
     def _set_default_panes(self) -> None:
@@ -420,8 +445,8 @@ class MainWindow:
             total = self.main_paned.winfo_width()
             if total <= 100:
                 total = self.root.winfo_width()
-            sash0 = min(380, max(360, int(total * 0.25)))
-            sash1 = max(sash0 + 400, total - 290)
+            sash0 = min(340, max(300, int(total * 0.23)))
+            sash1 = max(sash0 + 400, total - 250)
             self.main_paned.sashpos(0, sash0)
             self.main_paned.sashpos(1, sash1)
         except Exception:
@@ -515,11 +540,16 @@ class MainWindow:
             self.status_meta.config(text="")
             return
         type_map = {
-            ProductionType.ASSEMBLY: "烟弹组装",
-            ProductionType.LIQUID_FILLING: "烟油灌装",
-            ProductionType.POUCH_PACKAGING: "尼古丁袋包装",
+            ProductionType.ASSEMBLY: "通用离散装配",
+            ProductionType.LIQUID_FILLING: "液体批次",
+            ProductionType.POUCH_PACKAGING: "机台包装",
         }
-        ptype = type_map.get(self.production_line.production_type, "烟弹组装")
+        ptype = type_map.get(self.production_line.production_type, "通用离散装配")
+        if hasattr(self, 'project_title'):
+            self.project_title.config(text=self.production_line.name)
+            self.project_subtitle.config(text=(
+                f"{ptype}　/　{self.production_line.shift_hours}小时班次　/　"
+                f"产出单位：{self.production_line.get_unit()}"))
         self.status_meta.config(
             text=f"生产类型：{ptype}　|　单位：{self.production_line.get_unit()}/h"
         )
@@ -1018,7 +1048,7 @@ class MainWindow:
         if (self.production_line
                 and self.production_line.production_type == ProductionType.LIQUID_FILLING):
             messagebox.showinfo(
-                "当前模型暂不支持", "烟油采用配方批次模型。当前不支持按工序人数反推编制、"
+                "当前模型暂不支持", "液体采用配方批次模型。当前不支持按工序人数反推编制、"
                 "敏感性试算或遗传优化；可使用批次仿真和报告查看放行结果。"
             )
             return False
@@ -1244,6 +1274,30 @@ class MainWindow:
                 self.speed_combo.config(state='readonly')
                 self._lock_configuration(False)
     
+    def _configure_output_unit(self) -> None:
+        """配置离散产出标签，不转换物理数量。"""
+        if not self._can_change_configuration() or self.production_line is None:
+            return
+        from tkinter import simpledialog
+        from src.utils import validate_production_line
+        value = simpledialog.askstring(
+            "产出单位", "单位标签（如件、台、套）；不执行数量换算。液体固定为千克。",
+            initialvalue=self.production_line.get_unit(), parent=self.root)
+        if value is None:
+            return
+        candidate = copy.deepcopy(self.production_line)
+        candidate.output_unit = value.strip()
+        if not candidate.output_unit:
+            messagebox.showerror("错误", "产出单位不能为空")
+            return
+        valid, error = validate_production_line(candidate)
+        if not valid:
+            messagebox.showerror("错误", error)
+            return
+        self.production_line.output_unit = candidate.output_unit
+        self._mark_dirty()
+        self._update_display()
+
     def _btn_config_shift(self) -> None:
         """班次配置按钮"""
         if not self._can_change_configuration():
@@ -1343,6 +1397,8 @@ class MainWindow:
             station.job_role = updated.job_role
             station.machine_takt = updated.machine_takt
             station.machine_count = updated.machine_count
+            station.min_machine_takt = updated.min_machine_takt
+            station.changeover_time = updated.changeover_time
             station.clean_time_minutes = updated.clean_time_minutes
             station.sampling_rate = updated.sampling_rate
             station.defect_rate = updated.defect_rate
@@ -1467,7 +1523,7 @@ class MainWindow:
         if (self.production_line
                 and self.production_line.production_type == ProductionType.LIQUID_FILLING):
             messagebox.showinfo(
-                "请配置配方换型", "烟油采用配方批次模型，请在配置中的配方换型矩阵定义换型；"
+                "请配置配方换型", "液体采用配方批次模型，请在配置中的配方换型矩阵定义换型；"
                 "当前不支持离散工序手动停机。"
             )
             return

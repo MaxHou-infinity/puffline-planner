@@ -1,6 +1,6 @@
 # PuffLine Planner 用户指南
 
-PuffLine Planner 是面向电子烟制造场景的离散事件仿真与人力规划工具。本指南介绍安装、基础工作流、配置口径和常见问题；产品亮点与下载入口见[项目主页](../README.md)。
+PuffLine Planner 是面向消费类硬件装配等场景的离散事件仿真与人力规划工具。本指南介绍安装、基础工作流、配置口径和常见问题；产品亮点与下载入口见[项目主页](../README.md)。
 
 ## 安装与启动
 
@@ -8,7 +8,7 @@ PuffLine Planner 是面向电子烟制造场景的离散事件仿真与人力规
 
 前往 [GitHub Releases](https://github.com/MaxHou-infinity/puffline-planner/releases)，下载与操作系统对应的压缩包：
 
-- 当前公开版本 v3.3.3 起：下载 `PuffLine-Planner-macOS-v<版本号>.zip` 或 `PuffLine-Planner-Windows-v<版本号>.zip`，解压后运行 `PuffLine Planner.app` 或 `PuffLine-Planner.exe`。
+- 当前版本 v3.5.0：下载 `PuffLine-Planner-macOS-v3.5.0.zip` 或 `PuffLine-Planner-Windows-v3.5.0.zip`，解压后运行 `PuffLine Planner.app` 或 `PuffLine-Planner.exe`。v3.3.3 起沿用这一命名规则。
 - 历史 v3.3.2：附件仍使用 `E-Pod-Line-Simulator-macOS-v3.3.2.zip` 或 `E-Pod-Line-Simulator-Windows-v3.3.2.zip`，解压后运行历史名称的 App 或 EXE。
 
 已打包应用无需另行安装 Python 依赖。请以 Release 页面实际列出的附件为准。
@@ -32,7 +32,7 @@ python run.py
 
 启动器会检查运行依赖；缺少依赖时，会在用户确认后联网安装。macOS 若提示无法打开 `启动.command`，请在访达中右键该文件并选择“打开”。
 
-仓库的 `examples/` 目录提供两份脱敏的烟弹装配线方案，可用于熟悉方案导入和对比流程。
+仓库的 `examples/consumer-hardware-demo.json` 提供合成硬件装配配置；`examples/` 也保留历史行业方案。合成参数须按现场测时校准。
 
 ## 第一次完成仿真
 
@@ -84,7 +84,7 @@ python run.py
 
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
-| `name` | string | 产线名称 | `电子烟产线_标准版` |
+| `name` | string | 产线名称 | `通用硬件装配线` |
 | `shift_hours` | number | 班次时长（小时） | `8` |
 | `break_minutes` | number | 休息时间（分钟） | `60` |
 | `worker_hourly_wage` | number | 工人时薪（元/小时） | `20.0` |
@@ -95,7 +95,7 @@ python run.py
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
 | `id` | string | 工序唯一 ID | `s01` |
-| `name` | string | 工序名称 | `注油` |
+| `name` | string | 工序名称 | `功能测试` |
 | `process_time` | number | 单件耗时（秒） | `25` |
 | `worker_count` | integer | 工人数量 | `2` |
 | `collaboration_type` | string | `parallel`（并联）或 `collaborative`（协同） | `parallel` |
@@ -105,13 +105,9 @@ python run.py
 | `buffer_capacity` | integer | 缓冲区容量 | `100` |
 | `machine_count` | integer | 机台数量，与工人数量独立 | `1` |
 
-部分字段会随生产类型变化：
+v3.5.0：离散装配与机台包装可配置机台节拍、独立台数、抽检、缺陷和原工序返工；液体批次可配置清洗与质量门。
 
-- 尼古丁袋：可配置机台节拍。
-- 烟油灌装：可配置 CIP/SIP 清洗时间。
-- 烟油灌装与尼古丁袋：可配置抽检比例、缺陷率和返工时长。
-
-计量单位也会随生产类型切换：烟弹组装使用“颗”，烟油灌装使用“千克”，尼古丁袋使用“袋”。界面 KPI、方案对比和报告会同步显示对应单位。
+新建离散装配和通用机台模板使用“件”，可通过主界面“产出单位”设置为台、套等标签。旧方案保留“颗”或“袋”；液体批次按千克计算。界面 KPI、方案对比和报告同步显示单位。
 
 ### 成本与产量口径
 
@@ -183,3 +179,26 @@ python run.py
 - 方案、历史与日志保存在用户数据目录。macOS 为 `~/Library/Application Support/PuffLinePlanner/`；Windows 为 `%APPDATA%/PuffLinePlanner/`。首次使用新版时复制原 `configs/` 中的方案/历史，保留原文件；已有新文件时不覆盖。
 - 可用 `PUFFLINE_DATA_DIR` 指定独立本地数据目录进行测试。保存失败会明确提示并保留原方案，不能把失败写入当作成功保存。
 - 新 Excel 模板使用千克表头，兼容旧 `L` 后缀列名；该兼容仅是历史字段别名，不执行密度换算。导入前需确认数量已按当前千克口径准备。
+
+## v3.5.0 更新
+
+v3.5.0 的源码及桌面安装包提供以下能力：
+
+- 快速配置向导提供通用合成装配、液体批次与包装示例；历史电子烟方案继续可读。
+- 离散装配与机台包装均可设置机台节拍、台数、岗位、抽检、缺陷与原工序返工。
+- 主界面“产出单位”可设置件、台、套等标签；不做数量换算。液体固定为千克。
+- 新建工序默认计划换型为0分钟，工序编辑器可以修改；旧配置省略该字段时仍使用历史45分钟。
+- “最低机台节拍”必须有现场依据，且大于0、不高于当前机台节拍。留空时优化器不授权缩短当前节拍。
+- Excel 支持 `output_unit` 产线配置和“最低机台节拍(秒)”工序列；旧 Excel 缺少新字段时保留历史解释。
+- 历史趋势按当前产线（无产线时按最近记录）的单位筛选，避免混画台、件、千克；不同单位方案不可直接比较。
+
+这些模型用于顺序工序预评估，不包含分支汇合、共享资源、批量老化或返修路线。
+完整开发记录见 [v3.5.0 路线图](roadmap-v3.5.0.md)。
+
+### 清爽专业桌面界面
+
+v3.5.0 采用统一的浅色现代控件；运行、暂停、配置与分析菜单路径保持一致。
+工序编辑器按基本信息、加工能力、质量与返工分组，底部保存/取消保持可见。
+小屏表单可滚动，键盘焦点进入不可见字段时会自动滚动到该字段。
+KPI仍明确区分配置预估与本次仿真实绩；更换界面不会更改仿真计算口径。
+源码运行须重新安装requirements.txt中的依赖，包含固定版本ttkbootstrap和Pillow。

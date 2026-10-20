@@ -52,8 +52,6 @@ from src.version import (
 )
 from src.models import (
     ProductionType,
-    create_liquid_line,
-    create_pouch_line,
 )
 from src.hr_planning import (
     LaborCostConfig,
@@ -87,7 +85,8 @@ def scrollable_form(parent, padding=15):
     """A resizable form whose controls remain reachable on small displays."""
     container = ttk.Frame(parent)
     container.pack(fill=tk.BOTH, expand=True)
-    canvas = tk.Canvas(container, highlightthickness=0, takefocus=False)
+    canvas = tk.Canvas(container, bg=COLORS['surface'],
+                       highlightthickness=0, takefocus=False)
     scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
     canvas.configure(yscrollcommand=scrollbar.set)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -108,6 +107,14 @@ def scrollable_form(parent, padding=15):
         if top < visible_top or bottom > visible_top + canvas.winfo_height():
             height = max(1, content.winfo_reqheight())
             canvas.yview_moveto(max(0, top - 20) / height)
+    def wheel(event):
+        if not str(event.widget).startswith(str(container)):
+            return
+        if content.winfo_reqheight() > canvas.winfo_height():
+            amount = max(1, abs(int(event.delta)) // 120)
+            canvas.yview_scroll(-amount if event.delta > 0 else amount, 'units')
+            return 'break'
+    parent.bind('<MouseWheel>', wheel, add='+')
     parent.bind("<FocusIn>", reveal, add="+")
     return content
 
@@ -170,28 +177,23 @@ def build_template_line(key: str) -> ProductionLine:
 
 
 def station_edit_fields(production_type: ProductionType) -> set:
-    """
-    工序编辑字段与生产类型的映射（V1.3）
-
-    - assembly：不显示任何 V1.3 字段
-    - liquid_filling：清洗时间（CIP/SIP）+ 质量门（抽检/缺陷/返工）
-    - pouch_packaging：机台节拍 + 质量门（抽检/缺陷/返工），
-      清洗时间对高速包装无排程意义，不显示
-    """
-    quality = {'sampling_rate', 'defect_rate', 'rework_minutes'}
+    """按执行模型开放能力；离散装配与包装共享机台和质检字段。"""
+    quality = {'sampling_rate', 'defect_rate', 'rework_minutes', 'job_role'}
     if production_type == ProductionType.LIQUID_FILLING:
-        return {'clean_time_minutes', 'job_role'} | quality
-    if production_type == ProductionType.POUCH_PACKAGING:
-        return {'machine_takt', 'job_role'} | quality
-    return set()
+        return {'clean_time_minutes'} | quality
+    return {'machine_takt'} | quality
+
 
 
 JOB_ROLE_LABELS = {
-    JobRole.MIXER.value: "调香师/调配工",
+    JobRole.MIXER.value: "调配工",
     JobRole.FILLING_OPERATOR.value: "灌装操作员",
     JobRole.QC_TECHNICIAN.value: "QC 化验员",
     JobRole.PACKAGING_OPERATOR.value: "包装机手",
     JobRole.CLEANER.value: "清洗工",
+    JobRole.ASSEMBLER.value: "装配工",
+    JobRole.TEST_OPERATOR.value: "测试员",
+    JobRole.MAINTENANCE.value: "维修技术员",
     JobRole.GENERAL.value: "通用装配工",
 }
 
@@ -251,7 +253,7 @@ class ConfigPanel(ttk.Frame):
         ttk.Label(title_frame, text="工序配置", font=(resolve_font_family(), 12, 'bold')).pack(side=tk.LEFT, padx=5)
         self.production_type_label = ttk.Label(
             title_frame,
-            text="类型：烟弹组装",
+            text="类型：通用离散装配",
             foreground=COLORS['text_secondary'],
             font=(resolve_font_family(), 9),
         )
@@ -397,13 +399,13 @@ class ConfigPanel(ttk.Frame):
     def set_production_type(self, production_type: ProductionType) -> None:
         """更新生产类型标签"""
         label_map = {
-            ProductionType.ASSEMBLY: "类型：烟弹组装",
-            ProductionType.LIQUID_FILLING: "类型：烟油灌装",
-            ProductionType.POUCH_PACKAGING: "类型：尼古丁袋包装",
+            ProductionType.ASSEMBLY: "类型：通用离散装配",
+            ProductionType.LIQUID_FILLING: "类型：液体批次",
+            ProductionType.POUCH_PACKAGING: "类型：机台包装",
         }
         if hasattr(self, 'production_type_label'):
             self.production_type_label.config(
-                text=label_map.get(production_type, "类型：烟弹组装")
+                text=label_map.get(production_type, "类型：通用离散装配")
             )
 
     def set_unit(self, unit: str) -> None:
@@ -457,7 +459,7 @@ class KPIDashboard(ttk.LabelFrame):
     
     def __init__(self, parent):
         """初始化KPI仪表盘"""
-        super().__init__(parent, text="KPI仪表盘", padding=10)
+        super().__init__(parent, text="产能与人力预估", padding=8)
         
         # KPI标签
         self.kpi_labels: Dict[str, ttk.Label] = {}
@@ -494,7 +496,7 @@ class KPIDashboard(ttk.LabelFrame):
         
         # 分隔线
         separator = ttk.Separator(self, orient=tk.HORIZONTAL)
-        separator.pack(fill=tk.X, pady=10)
+        separator.pack(fill=tk.X, pady=5)
         
         # 使用Grid布局，6列显示6个KPI（卡片化）
         kpis = [
@@ -516,9 +518,9 @@ class KPIDashboard(ttk.LabelFrame):
                 kpi_frame,
                 bg=COLORS['surface'],
                 highlightbackground=COLORS['border'],
-                highlightthickness=1,
+                highlightthickness=0,
                 padx=10,
-                pady=8,
+                pady=3,
             )
             cell.grid(row=0, column=i, sticky='nsew', padx=6, pady=4)
             kpi_frame.grid_columnconfigure(i, weight=1)
@@ -541,7 +543,7 @@ class KPIDashboard(ttk.LabelFrame):
                 text="--",
                 bg=COLORS['surface'],
                 fg=COLORS['text'],
-                font=(family, 15, 'bold'),
+                font=(family, -23, 'bold'),
             )
             value_label.pack()
             if key == 'total_cost':
@@ -577,7 +579,7 @@ class KPIDashboard(ttk.LabelFrame):
         self.bind("<Configure>", self._reflow_kpis)
 
     def _reflow_kpis(self, event):
-        columns = 6 if event.width >= 900 else (3 if event.width >= 480 else 2)
+        columns = 6 if event.width >= 640 else (3 if event.width >= 420 else 2)
         if columns == self._kpi_columns:
             return
         self._kpi_columns = columns
@@ -731,7 +733,7 @@ class AlertPanel(ttk.LabelFrame):
     
     def __init__(self, parent):
         """初始化报警面板"""
-        super().__init__(parent, text="报警信息", padding=8)
+        super().__init__(parent, text="分析提醒", padding=12)
         self._alerts: List[Alert] = []
         self._collapsed = False
 
@@ -748,22 +750,27 @@ class AlertPanel(ttk.LabelFrame):
         )
         self.filter_combo.pack(side=tk.LEFT, padx=2)
         self.filter_combo.bind('<<ComboboxSelected>>', lambda e: self._apply_filter())
-        self.btn_clear = ttk.Button(header, text="清空", width=5, command=self._clear)
+        actions = ttk.Frame(self)
+        actions.pack(fill=tk.X, pady=(8, 4))
+        self.btn_clear = ttk.Button(actions, text="清空", command=self._clear)
         self.btn_clear.pack(side=tk.LEFT, padx=2)
         self.btn_collapse = ttk.Button(
-            header, text="折叠", width=5, command=self._toggle_collapse
+            actions, text="折叠", command=self._toggle_collapse
         )
         self.btn_collapse.pack(side=tk.LEFT, padx=2)
         self.btn_copy_alerts = ttk.Button(
-            header,
-            text="📋 复制",
-            width=7,
+            actions,
+            text="复制",
             command=self._copy_alerts,
         )
         self.btn_copy_alerts.pack(side=tk.RIGHT)
 
         # 报警列表（使用Text组件显示）
-        self.text_widget = tk.Text(self, height=10, width=28, wrap=tk.WORD)
+        self.text_widget = tk.Text(
+            self, height=10, width=28, wrap=tk.WORD, bg=COLORS['surface'],
+            fg=COLORS['text'], relief=tk.FLAT, borderwidth=0, highlightthickness=0,
+            padx=12, pady=14, font=(resolve_font_family(), -13), spacing3=8,
+            selectbackground=COLORS['primary_soft'], insertbackground=COLORS['text'])
         self.text_widget.pack(fill=tk.BOTH, expand=True)
 
         # 配置文本样式
@@ -888,7 +895,7 @@ class StationDialog:
         # 创建对话框窗口
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
-        self.dialog.geometry("500x580")
+        self.dialog.geometry(f"660x{min(780, parent.winfo_screenheight() - 100)}")
         self.dialog.transient(parent)  # 设置为父窗口的子窗口
         self.dialog.grab_set()  # 模态对话框
         
@@ -908,151 +915,94 @@ class StationDialog:
         self.dialog.wait_window()
     
     def _create_widgets(self, station: Optional[Station]) -> None:
-        """创建界面组件"""
-        # 主框架
-        main_frame = scrollable_form(self.dialog, padding=20)
-        
-        # 工序名称
-        ttk.Label(main_frame, text="工序名称:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        """分组双列表单；仅表单体滚动，标题和保存操作保持可见。"""
+        header = ttk.Frame(self.dialog, padding=(24, 18))
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="编辑工序" if station else "添加工序",
+                  style="Heading.TLabel").pack(anchor=tk.W)
+        ttk.Label(header, text="配置加工能力、岗位与质量参数",
+                  foreground=COLORS['text_secondary']).pack(anchor=tk.W, pady=(6, 0))
+        ttk.Separator(self.dialog).pack(fill=tk.X)
+        footer = ttk.Frame(self.dialog, padding=(24, 14))
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.save_button = ttk.Button(
+            footer, text="保存修改", command=self._btn_ok, style="Primary.TButton")
+        self.save_button.pack(side=tk.RIGHT)
+        ttk.Button(footer, text="取消", command=self._btn_cancel).pack(side=tk.RIGHT, padx=8)
+        main_frame = scrollable_form(self.dialog, padding=24)
+        for column in (0, 1):
+            main_frame.columnconfigure(column, weight=1, uniform='fields')
+
+        def section(text, row):
+            ttk.Label(main_frame, text=text, style="Section.TLabel").grid(
+                row=row, column=0, columnspan=2, sticky=tk.W, pady=(12, 12))
+
+        def field(text, variable, row, column, values=None):
+            label = ttk.Label(main_frame, text=text, foreground=COLORS['text_secondary'])
+            label.grid(row=row, column=column, sticky=tk.W, padx=(0, 18), pady=(2, 7))
+            if values is None:
+                widget = ttk.Entry(main_frame, textvariable=variable, width=22)
+            else:
+                widget = ttk.Combobox(main_frame, textvariable=variable, values=values,
+                                      state='readonly', width=20)
+            widget.grid(row=row + 1, column=column, sticky=tk.EW, padx=(0, 18), pady=(0, 13))
+            return label, widget
+
         self.name_var = tk.StringVar(value=station.name if station else "")
-        name_entry = ttk.Entry(main_frame, textvariable=self.name_var, width=30)
-        name_entry.grid(row=0, column=1, pady=5)
-        
-        # 单颗耗时
-        ttk.Label(main_frame, text="单件耗时(秒):").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.time_var = tk.StringVar(value=str(station.process_time) if station else "30")
-        time_entry = ttk.Entry(main_frame, textvariable=self.time_var, width=30)
-        time_entry.grid(row=1, column=1, pady=5)
-        
-        # 工人数量
-        ttk.Label(main_frame, text="工人数量:").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.workers_var = tk.StringVar(value=str(station.worker_count) if station else "1")
-        workers_entry = ttk.Entry(main_frame, textvariable=self.workers_var, width=30)
-        workers_entry.grid(row=2, column=1, pady=5)
-        
-        # 协作模式
-        ttk.Label(main_frame, text="协作模式:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        self.mode_var = tk.StringVar(value=station.collaboration_type.value if station else "parallel")
-        mode_frame = ttk.Frame(main_frame)
-        mode_frame.grid(row=3, column=1, pady=5, sticky=tk.W)
-        ttk.Radiobutton(mode_frame, text="并联", variable=self.mode_var, value="parallel").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(mode_frame, text="协同", variable=self.mode_var, value="collaborative").pack(side=tk.LEFT, padx=5)
-        
-        # OEE
-        ttk.Label(main_frame, text="OEE (0-1):").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.mode_var = tk.StringVar(
+            value=station.collaboration_type.value if station else "parallel")
         self.oee_var = tk.StringVar(value=str(station.oee) if station else "0.85")
-        oee_entry = ttk.Entry(main_frame, textvariable=self.oee_var, width=30)
-        oee_entry.grid(row=4, column=1, pady=5)
-
-        # V3.3.1：工种（按生产类型显示）
-        if self.line_type == ProductionType.LIQUID_FILLING:
-            role_values = [
-                "mixer", "filling_operator", "qc_technician", "cleaner", "general",
-            ]
-        elif self.line_type == ProductionType.POUCH_PACKAGING:
-            role_values = [
-                "packaging_operator", "qc_technician", "mixer", "cleaner", "general",
-            ]
-        else:
-            role_values = ["general"]
-        self._role_label_to_value = {
-            JOB_ROLE_LABELS[v]: v for v in role_values
-        }
-        current_role = (
-            station.job_role.value if station and station.job_role else "general"
-        )
-        if current_role not in role_values:
-            current_role = "general"
+        self._role_label_to_value = {label: role for role, label in JOB_ROLE_LABELS.items()}
+        current_role = station.job_role.value if station else JobRole.GENERAL.value
         self.job_role_var = tk.StringVar(value=JOB_ROLE_LABELS[current_role])
-        self.job_role_label = ttk.Label(main_frame, text="工种:")
-        self.job_role_label.grid(row=5, column=0, sticky=tk.W, pady=5)
-        self.job_role_combo = ttk.Combobox(
-            main_frame,
-            textvariable=self.job_role_var,
-            values=[JOB_ROLE_LABELS[v] for v in role_values],
-            state="readonly",
-            width=28,
-        )
-        self.job_role_combo.grid(row=5, column=1, pady=5)
-
-        # V1.3：生产类型相关字段
         self.machine_takt_var = tk.StringVar(
-            value=str(station.machine_takt) if station and station.machine_takt else ""
-        )
-        self.clean_time_var = tk.StringVar(
-            value=str(station.clean_time_minutes) if station else "0"
-        )
-        self.sampling_var = tk.StringVar(
-            value=str(station.sampling_rate) if station else "0"
-        )
-        self.defect_var = tk.StringVar(
-            value=str(station.defect_rate) if station else "0"
-        )
-        self.rework_var = tk.StringVar(
-            value=str(station.rework_minutes) if station else "0"
-        )
+            value=str(station.machine_takt) if station and station.machine_takt else "")
+        self.machine_count_var = tk.StringVar(value=str(station.machine_count) if station else "1")
+        self.min_takt_var = tk.StringVar(
+            value=str(station.min_machine_takt) if station and station.min_machine_takt else "")
+        self.changeover_var = tk.StringVar(value=str(station.changeover_time) if station else "0")
+        self.clean_time_var = tk.StringVar(value=str(station.clean_time_minutes) if station else "0")
+        self.sampling_var = tk.StringVar(value=str(station.sampling_rate) if station else "0")
+        self.defect_var = tk.StringVar(value=str(station.defect_rate) if station else "0")
+        self.rework_var = tk.StringVar(value=str(station.rework_minutes) if station else "0")
 
-        self.machine_takt_label = ttk.Label(main_frame, text="机台节拍(秒):")
-        self.machine_takt_label.grid(row=6, column=0, sticky=tk.W, pady=5)
-        self.machine_takt_entry = ttk.Entry(
-            main_frame, textvariable=self.machine_takt_var, width=30
-        )
-        self.machine_takt_entry.grid(row=6, column=1, pady=5)
-        self.machine_count_var = tk.StringVar(
-            value=str(getattr(station, "machine_count", 1))
-        )
-        self.machine_count_label = ttk.Label(main_frame, text="机台数量（台）:")
-        self.machine_count_label.grid(row=11, column=0, sticky=tk.W, pady=5)
-        self.machine_count_entry = ttk.Entry(
-            main_frame, textvariable=self.machine_count_var, width=30
-        )
-        self.machine_count_entry.grid(row=11, column=1, pady=5)
-        ToolTip(self.machine_count_entry, "机台产能由台数决定；工人数量用于岗位和人工成本。")
-
-        self.clean_time_label = ttk.Label(main_frame, text="清洗时间(分钟):")
-        self.clean_time_label.grid(row=7, column=0, sticky=tk.W, pady=5)
-        self.clean_time_entry = ttk.Entry(
-            main_frame, textvariable=self.clean_time_var, width=30
-        )
-        self.clean_time_entry.grid(row=7, column=1, pady=5)
-
-        self.sampling_label = ttk.Label(main_frame, text="抽检比例(0-1):")
-        self.sampling_label.grid(row=8, column=0, sticky=tk.W, pady=5)
-        self.sampling_entry = ttk.Entry(
-            main_frame, textvariable=self.sampling_var, width=30
-        )
-        self.sampling_entry.grid(row=8, column=1, pady=5)
-
-        self.defect_label = ttk.Label(main_frame, text="缺陷率(0-1):")
-        self.defect_label.grid(row=9, column=0, sticky=tk.W, pady=5)
-        self.defect_entry = ttk.Entry(
-            main_frame, textvariable=self.defect_var, width=30
-        )
-        self.defect_entry.grid(row=9, column=1, pady=5)
-
-        self.rework_label = ttk.Label(main_frame, text="返工时长(分钟):")
-        self.rework_label.grid(row=10, column=0, sticky=tk.W, pady=5)
-        self.rework_entry = ttk.Entry(
-            main_frame, textvariable=self.rework_var, width=30
-        )
-        self.rework_entry.grid(row=10, column=1, pady=5)
-
+        section("基本信息", 0)
+        _, name_entry = field("工序名称", self.name_var, 1, 0)
+        self.job_role_label, self.job_role_combo = field(
+            "岗位", self.job_role_var, 1, 1, list(JOB_ROLE_LABELS.values()))
+        section("加工能力", 3)
+        field("单件加工时间 / 秒", self.time_var, 4, 0)
+        field("人员数量 / 人", self.workers_var, 4, 1)
+        ttk.Label(main_frame, text="人工协作方式", foreground=COLORS['text_secondary']).grid(
+            row=6, column=0, sticky=tk.W, pady=(2, 7))
+        modes = ttk.Frame(main_frame)
+        modes.grid(row=7, column=0, sticky=tk.W, pady=(0, 13))
+        for value, text in [('parallel', '并联'), ('collaborative', '协同')]:
+            ttk.Radiobutton(modes, text=text, variable=self.mode_var, value=value).pack(
+                side=tk.LEFT, padx=(0, 14))
+        field("设备综合效率 OEE / 0–1", self.oee_var, 6, 1)
+        self.machine_takt_label, self.machine_takt_entry = field(
+            "机台节拍 / 秒", self.machine_takt_var, 8, 0)
+        self.machine_count_label, self.machine_count_entry = field(
+            "机台数量 / 台", self.machine_count_var, 8, 1)
+        if self.line_type != ProductionType.LIQUID_FILLING:
+            _, entry = field("最低机台节拍 / 秒", self.min_takt_var, 10, 0)
+            ToolTip(entry, "现场可行下界；留空不授权优化器缩短当前节拍。")
+        field("每班计划换型 / 分钟", self.changeover_var, 10, 1)
+        ToolTip(self.machine_count_entry, "机台台数决定设备能力，人数用于岗位与人工成本。")
+        section("质量与返工", 12)
+        self.sampling_label, self.sampling_entry = field(
+            "抽检比例 / 0–1", self.sampling_var, 13, 0)
+        self.defect_label, self.defect_entry = field(
+            "缺陷率 / 0–1", self.defect_var, 13, 1)
+        self.rework_label, self.rework_entry = field(
+            "原工序返工时间 / 分钟", self.rework_var, 15, 0)
+        self.clean_time_label, self.clean_time_entry = field(
+            "清洗时间 / 分钟", self.clean_time_var, 15, 1)
         self._apply_type_fields()
-        
-        # 按钮框架
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=12, column=0, columnspan=2, pady=20)
-        
-        # 确定按钮
-        btn_ok = ttk.Button(button_frame, text="确定", command=self._btn_ok, style="Primary.TButton")
-        btn_ok.pack(side=tk.LEFT, padx=10)
-        
-        # 取消按钮
-        btn_cancel = ttk.Button(button_frame, text="取消", command=self._btn_cancel)
-        btn_cancel.pack(side=tk.LEFT, padx=10)
-        
-        # 聚焦到名称输入框
-        name_entry.focus()
+        name_entry.focus_set()
 
     def _apply_type_fields(self) -> None:
         """
@@ -1078,7 +1028,7 @@ class StationDialog:
                 label.grid_remove()
                 entry.grid_remove()
         for widget in (self.machine_count_label, self.machine_count_entry):
-            if self.line_type == ProductionType.POUCH_PACKAGING:
+            if self.line_type != ProductionType.LIQUID_FILLING:
                 widget.grid()
             else:
                 widget.grid_remove()
@@ -1104,6 +1054,14 @@ class StationDialog:
             machine_count = int(self.machine_count_var.get())
             if machine_count < 1:
                 raise ValueError("机台数量必须为正整数")
+            changeover = float(self.changeover_var.get())
+            if not math.isfinite(changeover) or changeover < 0:
+                raise ValueError("换型时间须为有限非负数")
+            min_takt = float(self.min_takt_var.get()) if self.min_takt_var.get().strip() else None
+            if min_takt is not None and (
+                    not math.isfinite(min_takt) or min_takt <= 0
+                    or machine_takt is None or min_takt > machine_takt):
+                raise ValueError("最低机台节拍须大于0且不高于当前机台节拍")
             clean_time = float(self.clean_time_var.get() or 0)
             sampling = float(self.sampling_var.get() or 0)
             defect = float(self.defect_var.get() or 0)
@@ -1150,6 +1108,12 @@ class StationDialog:
                 oee=oee,
                 machine_takt=machine_takt,
                 machine_count=machine_count,
+                min_machine_takt=min_takt,
+                changeover_time=changeover,
+                efficiency=self.station.efficiency if self.station else 0.95,
+                buffer_capacity=self.station.buffer_capacity if self.station else 100,
+                bom=dict(self.station.bom) if self.station else {},
+                cleanroom_zone=self.station.cleanroom_zone if self.station else "",
                 clean_time_minutes=clean_time,
                 sampling_rate=sampling,
                 defect_rate=defect,
@@ -2073,7 +2037,7 @@ class AboutDialog:
         title = ttk.Label(
             main,
             text=f"{PRODUCT_NAME} v{__version__}",
-            font=(family, 15, 'bold'),
+            font=(family, -23, 'bold'),
         )
         title.pack(anchor=tk.W, pady=(0, 4))
 
@@ -2754,8 +2718,12 @@ class HistoryDialog:
         self.canvas.delete("all")
         kpi = self._label_to_key.get(self.kpi_var.get(), "daily_output")
         compare_kpi = self._label_to_key.get(self.compare_var.get(), "")
-        series = kpi_series(self.history, kpi)
-        compare_series = kpi_series(self.history, compare_kpi) if compare_kpi else []
+        chart_unit = (self.line.get_unit() if self.line else
+                      (self.history[-1].get('unit') if self.history else None))
+        chart_history = [record for record in self.history
+                         if not chart_unit or record.get('unit') == chart_unit]
+        series = kpi_series(chart_history, kpi)
+        compare_series = kpi_series(chart_history, compare_kpi) if compare_kpi else []
         reference = (
             build_snapshot(self.line).get("kpis", {}).get(kpi)
             if self.line is not None else None
@@ -2775,7 +2743,7 @@ class HistoryDialog:
         if compare_kpi in percent_kpis:
             compare_series = [(label, value * 100) for label, value in compare_series]
 
-        unit = self.line.get_unit() if self.line else {
+        unit = chart_unit or {
             'assembly': '颗', 'liquid_filling': '千克', 'pouch_packaging': '袋',
         }.get(self.history[-1].get('production_type'), '单位')
         units = {
@@ -3760,7 +3728,7 @@ class HelpDialog:
 1. 首次启动会自动打开「快速配置向导」；之后可用「文件 → 快速配置向导」
    一键生成产线，或从「方案」导入已有方案
 2. 在主界面添加/编辑工序（参数随生产类型自动适配；
-   烟油/尼古丁袋可设置工种）
+   液体/包装可设置工种）
 3. 点击「开始仿真」，观察画布、KPI 与报警；
    运行中可用「停机切换（换型）」模拟更换口味/规格/配方
 4. 保存方案（主界面或「文件 → 保存方案」）；
@@ -3772,7 +3740,7 @@ class HelpDialog:
 
 【亮点与价值】
 • 把产线设计从"2 周试错"压缩到"2 小时仿真"
-• 支持烟弹组装 / 烟油灌装（千克）/ 尼古丁袋三种生产类型
+• 支持通用离散装配 / 液体批次（千克）/ 机台包装三种执行模型
 • 智能报警：瓶颈、WIP、饥饿/堵塞、预测预警、根因建议
 • 人力规划：目标产量反推人数、成本、招聘缺口与爬坡达产
 • 统一浅色主题、2026 桌面级交互体验
@@ -3974,30 +3942,7 @@ class WizardDialog:
             auto_start = dialog.result['auto_start']
     """
 
-    TEMPLATES = {
-        "simple": [
-            ("注油", 25.0, 2, "parallel"),
-            ("焊接", 30.0, 3, "parallel"),
-            ("包装", 15.0, 2, "parallel"),
-        ],
-        "standard": [
-            ("注油", 25.0, 2, "parallel"),
-            ("焊接", 30.0, 3, "parallel"),
-            ("棉芯安装", 20.0, 2, "collaborative"),
-            ("组装", 22.0, 2, "parallel"),
-            ("包装", 15.0, 2, "parallel"),
-        ],
-        "complex": [
-            ("镭雕", 25.0, 5, "parallel"),
-            ("注油", 47.0, 1, "parallel"),
-            ("预压合", 47.0, 1, "parallel"),
-            ("底座压合", 48.0, 1, "parallel"),
-            ("阻值&适配测试", 45.0, 1, "parallel"),
-            ("异物检查", 232.0, 1, "parallel"),
-            ("组装", 22.0, 2, "parallel"),
-            ("包装", 15.0, 2, "parallel"),
-        ],
-    }
+    from src.templates import ASSEMBLY_TEMPLATES as TEMPLATES
 
     def __init__(self, parent):
         """初始化向导对话框"""
@@ -4078,7 +4023,7 @@ class WizardDialog:
         """步骤 1：模板选择"""
         ttk.Label(
             self.page_template,
-            text="生产类型决定计量单位与关键参数；新手建议先选「标准产线」体验完整流程。",
+            text="选择执行模型；离散装配也支持机台与质检；新手建议先选「标准产线」体验完整流程。",
             foreground="gray",
             wraplength=620,
             justify=tk.LEFT,
@@ -4089,14 +4034,14 @@ class WizardDialog:
         )
         self.production_type_var = tk.StringVar(value="assembly")
         type_hints = {
-            "assembly": "离散装配，计量单位：颗",
+            "assembly": "离散装配，默认单位：件，可在产出单位中修改",
             "liquid_filling": "液体/批量生产，计量单位：千克",
-            "pouch_packaging": "高速机台包装，计量单位：袋",
+            "pouch_packaging": "高速机台包装，默认单位：件，可修改",
         }
         for key, label in [
-            ("assembly", "烟弹组装（离散装配）"),
-            ("liquid_filling", "烟油灌装（液体/批量）"),
-            ("pouch_packaging", "尼古丁袋包装（高速机台）"),
+            ("assembly", "通用离散装配"),
+            ("liquid_filling", "液体批次（液体/批量）"),
+            ("pouch_packaging", "机台包装（高速机台）"),
         ]:
             radio = ttk.Radiobutton(
                 self.page_template,
@@ -4112,7 +4057,7 @@ class WizardDialog:
         template_hints = {
             "simple": "3 工序快速体验，适合首次了解流程",
             "standard": "5 工序均衡示例，推荐新手（默认）",
-            "complex": "8 工序贴近真实参数，适合正式评估",
+            "complex": "8 工序合成示例，须按现场测时校准",
             "blank": "从零手动添加，适合已有明确配置",
         }
         self._template_radios = {}
@@ -4164,7 +4109,8 @@ class WizardDialog:
         form.pack(fill=tk.X, pady=10)
 
         ttk.Label(form, text="班次时长(小时):").grid(row=0, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(form, textvariable=self.shift_hours_var, width=10).grid(row=0, column=1, padx=10)
+        self.shift_hours_entry = ttk.Entry(form, textvariable=self.shift_hours_var, width=10)
+        self.shift_hours_entry.grid(row=0, column=1, padx=10)
         ttk.Label(form, text="每班计划工作小时数", foreground="gray").grid(
             row=0, column=2, sticky=tk.W
         )
@@ -4281,9 +4227,11 @@ class WizardDialog:
         if self.template_var.get() == 'blank':
             return ProductionLine('新产线', production_type=ProductionType(production_type))
         if production_type == "liquid_filling":
-            return create_liquid_line()
+            from src.templates import build_process_template
+            return build_process_template("liquid_filling")
         if production_type == "pouch_packaging":
-            return create_pouch_line()
+            from src.templates import build_process_template
+            return build_process_template("pouch_packaging")
         return build_template_line(self.template_var.get())
 
     def _show_step(self, index: int) -> None:
@@ -4297,6 +4245,9 @@ class WizardDialog:
         self.step_label.config(text=titles[index])
         self.btn_prev.config(state=tk.NORMAL if index > 0 else tk.DISABLED)
         self.btn_next.config(text="完成" if index == len(pages) - 1 else "下一步")
+        if index == 2:
+            # 页面切换后聚焦首个输入，同时使macOS刷新刚映射的表单控件。
+            self.dialog.after_idle(self.shift_hours_entry.focus_set)
         if index == len(pages) - 1:
             self._refresh_summary()
 

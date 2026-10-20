@@ -75,7 +75,7 @@ def _per_head_capacity(station) -> float:
 
 def _validate_plan(line, daily_target, shift_plan) -> None:
     if line.production_type == ProductionType.LIQUID_FILLING:
-        raise ValueError('烟油采用配方批次模型，暂不支持按工序人数反推目标编制')
+        raise ValueError('液体批次采用配方批次模型，暂不支持按工序人数反推目标编制')
     if daily_target <= 0 or not math.isfinite(daily_target):
         raise ValueError('目标日产量必须为正的有限数值')
     if (shift_plan.shifts_per_day < 1

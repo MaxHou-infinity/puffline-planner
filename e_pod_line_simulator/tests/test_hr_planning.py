@@ -288,7 +288,7 @@ def test_hr_reports_machine_and_collaborative_capacity_constraints():
 def test_hr_rejects_unmodeled_liquid_and_invalid_shift_plans():
     line = make_assembly_line()
     line.production_type = ProductionType.LIQUID_FILLING
-    with pytest.raises(ValueError, match='烟油'):
+    with pytest.raises(ValueError, match='液体批次'):
         required_headcount_by_station(line, 100, ShiftPlan())
     line.production_type = ProductionType.ASSEMBLY
     for shift in [ShiftPlan(shifts_per_day=0), ShiftPlan(shifts_per_day=4),

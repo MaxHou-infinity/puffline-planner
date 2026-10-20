@@ -12,29 +12,29 @@ import tkinter as tk
 # ==================== 设计令牌 ====================
 
 COLORS = {
-    'bg': '#F5F6F8',          # 应用背景
+    'bg': '#F4F6F9',          # 应用背景
     'surface': '#FFFFFF',     # 卡片/面板表面
-    'border': '#E2E5EA',      # 边框
-    'text': '#1F2329',        # 主文本
-    'text_secondary': '#6B7280',  # 次要文本
-    'primary': '#2F6FED',     # 主色
-    'primary_hover': '#1F5FD8',
-    'primary_soft': '#EAF1FE',
+    'border': '#E2E7EE',      # 边框
+    'text': '#202B3C',        # 主文本
+    'text_secondary': '#637084',  # 次要文本
+    'primary': '#285DE5',     # 主色
+    'primary_hover': '#204EC3',
+    'primary_soft': '#EDF2FF',
     'success': '#34C759',
     'danger': '#FF3B30',
     'warning': '#FF9F0A',
     'info': '#0A84FF',
     'idle': '#E5E5EA',
     'danger_dark': '#B3261E',
-    'connection': '#6B7280',
+    'connection': '#637084',
     'chart_primary': '#1F6FEB',
     'chart_secondary': '#2DA44E',
     'chart_reference': '#B3261E',
     'chart_text': '#555555',
     'chart_muted': '#888888',
     'chart_baseline': '#EAF2FF',
-    'button_primary': '#1F2329',
-    'button_primary_hover': '#3A3D45',
+    'button_primary': '#285DE5',
+    'button_primary_hover': '#204EC3',
     'danger_soft': '#FDEBEA',
     'danger_soft_hover': '#F8D7D5',
     'disabled_text': '#B9C4D4',
@@ -106,8 +106,8 @@ THEMES = {
         'canvas': '#FFFFFF',
         'grid': '#EDEFF3',
         'hover': '#F0F3F8',
-        'focus': '#2F6FED',
-        'toast_bg': '#1F2329',
+        'focus': '#285DE5',
+        'toast_bg': '#202B3C',
         'toast_fg': '#FFFFFF',
     },
 }
@@ -147,7 +147,7 @@ def apply_theme(root) -> dict:
     """
     将设计令牌应用到 Tk 根窗口
 
-    - 切换到 clam 主题以获得跨平台一致的 ttk 样式
+    - 使用固定版本ttkbootstrap现代主题，保留原生Tk业务交互
     - 配置字体/颜色/间距/按钮/Treeview 等基础组件
 
     Args:
@@ -160,33 +160,49 @@ def apply_theme(root) -> dict:
     palette = THEMES['light']
     COLORS.update(palette)  # 就地更新模块级 COLORS，兼容既有引用
 
-    import tkinter as tk
     from tkinter import ttk
+    from ttkbootstrap import Style
+    from ttkbootstrap.style import ThemeDefinition
 
     family = resolve_font_family()
-    style = ttk.Style(root)
-    try:
-        style.theme_use('clam')
-    except tk.TclError:
-        pass
-
+    style = Style(theme='litera')
+    if 'puffline' not in style.theme_names():
+        style.register_theme(ThemeDefinition(
+            name='puffline', themetype='light', colors={
+                'primary': COLORS['primary'], 'secondary': COLORS['text_secondary'],
+                'success': COLORS['success'], 'info': COLORS['info'],
+                'warning': COLORS['warning'], 'danger': COLORS['danger_dark'],
+                'light': COLORS['bg'], 'dark': COLORS['text'],
+                'bg': COLORS['surface'], 'fg': COLORS['text'],
+                'selectbg': COLORS['primary_soft'], 'selectfg': COLORS['primary'],
+                'border': COLORS['border'], 'inputfg': COLORS['text'],
+                'inputbg': COLORS['surface'], 'active': COLORS['hover'],
+            }))
+    style.theme_use('puffline')
+    root._puffline_style = style  # 保持主题图像资源与当前Tk解释器同生命周期。
     style.configure(
         '.',
-        font=(family, 11),
-        background=COLORS['bg'],
+        font=(family, -14),
+        background=COLORS['surface'],
         foreground=COLORS['text'],
     )
-    style.configure('TFrame', background=COLORS['bg'])
-    style.configure('TLabel', background=COLORS['bg'], foreground=COLORS['text'])
-    style.configure('TLabelframe', background=COLORS['bg'], bordercolor=COLORS['border'])
+    style.configure('TFrame', background=COLORS['surface'])
+    style.configure('TLabel', background=COLORS['surface'], foreground=COLORS['text'])
+    style.configure('TLabelframe', background=COLORS['surface'],
+                    bordercolor=COLORS['surface'], borderwidth=0, relief='flat')
     style.configure(
         'TLabelframe.Label',
-        background=COLORS['bg'],
+        background=COLORS['surface'],
         foreground=COLORS['text'],
-        font=(family, 11, 'bold'),
+        font=(family, -14, 'bold'),
     )
-    style.configure('TButton', font=(family, 11), padding=(10, 5))
-    # 主按钮：克制"墨色"，替代大蓝
+    style.configure('TButton', font=(family, -14), padding=(12, 8),
+                    background=COLORS['surface'], foreground=COLORS['text'],
+                    bordercolor=COLORS['border'], borderwidth=1, relief='flat')
+    style.map('TButton', background=[('disabled', COLORS['bg']), ('active', COLORS['hover'])],
+              foreground=[('disabled', COLORS['text_secondary'])],
+              bordercolor=[('active', COLORS['border'])])
+    # 主操作使用蓝色，其余操作保持轻量。
     style.configure(
         'Primary.TButton',
         background=COLORS['button_primary'],
@@ -228,14 +244,18 @@ def apply_theme(root) -> dict:
         background=COLORS['surface'],
         fieldbackground=COLORS['surface'],
         foreground=COLORS['text'],
-        rowheight=26,
-        font=(family, 10),
-        selectbackground=COLORS['primary'],
-        selectforeground=COLORS['surface'],
+        rowheight=40,
+        borderwidth=0,
+        relief='flat',
+        font=(family, -14),
+        selectbackground=COLORS['primary_soft'],
+        selectforeground=COLORS['primary'],
     )
     style.configure(
         'Treeview.Heading',
-        font=(family, 10, 'bold'),
+        font=(family, -12),
+        relief='flat',
+        padding=(8, 10),
         background=COLORS['surface'],
         foreground=COLORS['text'],
     )
@@ -243,6 +263,8 @@ def apply_theme(root) -> dict:
         'TEntry',
         fieldbackground=COLORS['surface'],
         bordercolor=COLORS['border'],
+        padding=(9, 7),
+        relief='flat',
     )
     style.map(
         'TEntry',
@@ -252,15 +274,28 @@ def apply_theme(root) -> dict:
     style.configure('TCombobox', fieldbackground=COLORS['surface'], bordercolor=COLORS['border'])
     style.map('TCombobox', bordercolor=[('focus', COLORS['focus'])])
 
+    style.configure('TCombobox', padding=(9, 7), arrowsize=14)
+    style.map('TCombobox', fieldbackground=[('readonly', COLORS['surface'])],
+              foreground=[('readonly', COLORS['text'])])
+    style.map('Treeview', background=[('selected', COLORS['primary_soft'])],
+              foreground=[('selected', COLORS['primary'])])
+    style.configure('TSeparator', background=COLORS['border'])
+    style.configure('Heading.TLabel', font=(family, -19, 'bold'))
+    style.configure('Section.TLabel', font=(family, -13, 'bold'))
+    from src.ui_controls import install_control_elements
+    install_control_elements(root, style, COLORS)
     root.configure(bg=COLORS['bg'])
+    root.option_add('*Background', COLORS['surface'])
+    root.option_add('*Foreground', COLORS['text'])
+    root.option_add('*Text.background', COLORS['surface'])
+    root.option_add('*Text.foreground', COLORS['text'])
+    root.option_add('*Canvas.background', COLORS['surface'])
+    root.option_add('*Listbox.background', COLORS['surface'])
+    root.option_add('*selectBackground', COLORS['primary_soft'])
+    root.option_add('*selectForeground', COLORS['primary'])
     root.option_add('*Font', (family, 11))
     return palette
 
-    # HiDPI：按系统实际 DPI 设置 Tk 缩放，保证高分屏清晰
-    try:
-        root.tk.call('tk', 'scaling', root.winfo_fpixels('1i') / 72.0)
-    except Exception:
-        pass
 
 
 class ToolTip:

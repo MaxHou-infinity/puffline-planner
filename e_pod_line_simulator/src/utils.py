@@ -300,6 +300,7 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
             'efficiency': ['人员效率', '效率', 'efficiency', 'Efficiency', 'EFFICIENCY', '人员效率系数'],
             'changeover_time': ['切换时间(分钟)', '切换时间', 'changeover_time', 'Changeover Time', 'CHANGEOVER_TIME', '切换'],
             'buffer_capacity': ['缓冲区容量', '缓冲区', 'buffer_capacity', 'Buffer Capacity', 'BUFFER_CAPACITY', '缓冲'],
+            'min_machine_takt': ['最低机台节拍(秒)', 'min_machine_takt'],
             'machine_takt': ['机台节拍(秒)', '机台节拍', 'machine_takt', 'Machine Takt', 'MACHINE_TAKT'],
             'clean_time_minutes': ['清洗时间(分钟)', '清洗时间', 'clean_time_minutes', 'Clean Time', 'CLEAN_TIME_MINUTES'],
             'sampling_rate': ['抽检比例', 'sampling_rate', 'Sampling Rate', 'SAMPLING_RATE'],
@@ -341,6 +342,7 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
             return default
 
         line = ProductionLine(name="从Excel导入")
+        imported_unit = None
         if '产线配置' in sheets:
             for _, row in sheets['产线配置'].iterrows():
                 key, value = str(row.iloc[0]).strip(), row.iloc[1]
@@ -348,6 +350,8 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
                     continue
                 if key == 'production_type':
                     line.production_type = ProductionType(str(value).strip())
+                elif key == 'output_unit':
+                    imported_unit = str(value).strip()
                 elif key in ('shift_hours', 'break_minutes', 'worker_hourly_wage',
                              'cip_interval_batches', 'cip_interval_hours'):
                     setattr(line, key, number(value, 0, key, key == 'cip_interval_batches'))
@@ -359,6 +363,8 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
             type_df = pd.read_excel(file_path, sheet_name='生产类型', header=None)
             line.production_type = ProductionType(str(type_df.iloc[0, 1]).strip())
 
+        from src.models import UNIT_LABELS
+        line.output_unit = imported_unit or UNIT_LABELS[line.production_type]
         for _, row in sheets.get('原料', pd.DataFrame()).iterrows():
             material = Material(
                 name=str(row['原料名']).strip(), unit=str(pick(row, ['单位'], 'kg')),
@@ -404,6 +410,8 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
             '灌装操作员': JobRole.FILLING_OPERATOR, 'qc化验员': JobRole.QC_TECHNICIAN,
             'qc 化验员': JobRole.QC_TECHNICIAN, '化验员': JobRole.QC_TECHNICIAN,
             '包装机手': JobRole.PACKAGING_OPERATOR, '清洗工': JobRole.CLEANER,
+            '装配工': JobRole.ASSEMBLER, '测试员': JobRole.TEST_OPERATOR,
+            '维修技术员': JobRole.MAINTENANCE,
             '通用装配工': JobRole.GENERAL, '通用': JobRole.GENERAL,
         }
         for idx, row in df.iterrows():
@@ -416,7 +424,10 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
                 role = role_map[role_text] if role_text in role_map else JobRole(role_text)
                 workers = number(field('worker_count'), 1, '人数', True)
                 takt = field('machine_takt')
-                kwargs = {}
+                minimum = field('min_machine_takt')
+                kwargs = {'min_machine_takt': (
+                    number(minimum, 0, '最低机台节拍') if minimum is not None else None
+                )}
                 for key, default, integer in (
                     ('oee', .85, False), ('efficiency', .95, False),
                     ('changeover_time', 45, False), ('buffer_capacity', 100, True),
@@ -484,9 +495,9 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
         
         # 创建示例数据（V3.3.1：补齐 V1.3+/V3.2 字段）
         template_data = [
-            ['注油', 25, 2, '并联', 0.85, 0.95, 45, 100, '', 0, 0, 0, 0,
+            ['零件装配', 25, 2, '并联', 0.85, 0.95, 0, 100, '', 0, 0, 0, 0,
              '通用装配工', '', ''],
-            ['焊接', 30, 3, '并联', 0.90, 0.95, 45, 100, '', 0, 0, 0, 0,
+            ['焊接', 30, 3, '并联', 0.90, 0.95, 0, 100, '', 0, 0, 0, 0,
              '通用装配工', '', ''],
             ['组装', 20, 2, '协同', 0.88, 0.95, 0, 100, '', 0, 0, 0, 0,
              '通用装配工', '', ''],
@@ -495,12 +506,12 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
         ]
 
         df = pd.DataFrame(
-            [row + [1] for row in template_data],
+            [row + [1, None] for row in template_data],
             columns=[
                 '工序名', '耗时(秒)', '人数', '模式', 'OEE', '人员效率',
                 '切换时间(分钟)', '缓冲区容量', '机台节拍(秒)', '清洗时间(分钟)',
                 '抽检比例', '缺陷率', '返工时长(分钟)', '工种', '洁净区',
-                'BOM(组件:用量;...)', '机台数量',
+                'BOM(组件:用量;...)', '机台数量', '最低机台节拍(秒)',
             ],
         )
 
@@ -513,6 +524,7 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
             ['cip_interval_batches', 0],
             ['cip_interval_hours', 0.0],
             ['changeover_matrix_json', ''],
+            ['output_unit', '千克' if production_type == 'liquid_filling' else '件'],
         ]
 
         with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
@@ -523,7 +535,7 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
 
             if production_type in ('liquid_filling', 'pouch_packaging'):
                 recipe_df = pd.DataFrame([
-                    ['经典烟草', 500, 0.95, 20.0, '经典', 60, 240, 800, 30, 60],
+                    ['配方A', 500, 0.95, 0.0, '', 60, 240, 800, 30, 60],
                 ], columns=[
                     '配方名', '批次量kg', '收率', '尼古丁浓度', '口味',
                     '调配min', '陈化min', '灌装速率kg/h', 'QCmin', '清洗min',
@@ -537,18 +549,18 @@ def create_excel_template(file_path: str, production_type: str = "assembly") -> 
                 tank_df.to_excel(writer, sheet_name='罐', index=False)
 
                 batch_df = pd.DataFrame([
-                    ['B001', '经典烟草', 500, 'queued'],
+                    ['B001', '配方A', 500, 'queued'],
                 ], columns=['批次ID', '配方名', '批次量kg', '状态'])
                 batch_df.to_excel(writer, sheet_name='批次', index=False)
 
             # 原料与到货计划（V3.3.1，组装 BOM/烟油投料通用）
             material_df = pd.DataFrame([
-                ['棉芯', '个', 1000, 0.5],
+                ['组件A', '个', 1000, 0.5],
             ], columns=['原料名', '单位', '初始库存', '单价'])
             material_df.to_excel(writer, sheet_name='原料', index=False)
 
             arrival_df = pd.DataFrame([
-                [60, '棉芯', 500],
+                [60, '组件A', 500],
             ], columns=['到货时间(分钟)', '原料', '数量'])
             arrival_df.to_excel(writer, sheet_name='到货计划', index=False)
 
@@ -599,6 +611,18 @@ def validate_production_line(
         bounded(line.break_minutes, "休息时间")
         if line.break_minutes >= line.shift_hours * 60:
             return False, "休息时间必须小于班次时长"
+        if (not isinstance(line.output_unit, str) or len(line.output_unit) > 12
+                or any(c.isspace() or ord(c) < 32 for c in line.output_unit)):
+            return False, '产出单位必须为不含空白的短文本（最多12字）'
+        if (line.production_type == ProductionType.LIQUID_FILLING
+                and line.output_unit not in ('', '千克')):
+            return False, '液体批次模型固定按千克计算，不执行单位换算'
+        for station in line.stations:
+            if station.min_machine_takt is not None:
+                bounded(station.min_machine_takt, '最低机台节拍', positive=True)
+                if (station.machine_takt is None
+                        or station.min_machine_takt > station.machine_takt):
+                    return False, '最低机台节拍不能高于当前节拍，且必须配置机台节拍'
         if not isinstance(line.production_type, ProductionType):
             return False, "未知生产类型"
         ids = set()

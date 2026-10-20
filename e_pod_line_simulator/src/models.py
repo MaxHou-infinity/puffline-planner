@@ -40,11 +40,11 @@ class CollaborationType(Enum):
 
 class ProductionType(Enum):
     """
-    生产类型模板（V1.3）
+    执行模型标识（序列化值保留历史兼容）
 
-    - ASSEMBLY: 烟弹离散组装（现状默认）
-    - LIQUID_FILLING: 烟油液体/批量灌装
-    - POUCH_PACKAGING: 尼古丁袋高速包装
+    - ASSEMBLY: 通用离散装配
+    - LIQUID_FILLING: 液体批次近似模型
+    - POUCH_PACKAGING: 机台包装（历史标识）
     """
     ASSEMBLY = "assembly"
     LIQUID_FILLING = "liquid_filling"
@@ -67,6 +67,9 @@ class JobRole(Enum):
     QC_TECHNICIAN = "qc_technician"
     PACKAGING_OPERATOR = "packaging_operator"
     CLEANER = "cleaner"
+    ASSEMBLER = "assembler"
+    TEST_OPERATOR = "test_operator"
+    MAINTENANCE = "maintenance"
     GENERAL = "general"
 
 
@@ -134,8 +137,8 @@ class Station:
                               # 默认0.95表示人员实际效率是理论值的95%
     
     # 切换参数
-    changeover_time: int = 45  # 切换时间（分钟），更换产品型号时需要的停机时间
-                               # 默认45分钟，这是电子烟行业常见的切换时间
+    changeover_time: int = 0  # 切换时间（分钟），更换产品型号时需要的停机时间
+                               # 新建工序默认不预设换型；旧配置读取时保留45分钟
     
     # 缓冲区参数
     buffer_capacity: int = 100  # WIP缓冲区容量，工序间可以暂存的最大物料数
@@ -166,6 +169,7 @@ class Station:
 
     # V3.4：设备台数与操作员人数分离；放在末尾以保留旧位置参数兼容性。
     machine_count: int = 1
+    min_machine_takt: Optional[float] = None  # 优化最低节拍；空值表示不授权缩短
     
     def get_capacity(self) -> float:
         """生产时间内的能力（单位/小时），不按固定班长摊销停机。
@@ -253,6 +257,7 @@ class Station:
             Station: 新创建的工序对象
         """
         data = copy.deepcopy(data)
+        data.setdefault('changeover_time', 45)
         # 旧版本把工人数同时解释为台数。迁移时保留两者历史取值；新建默认一台。
         if data.get('machine_takt') is not None and 'machine_count' not in data:
             data['machine_count'] = data.get('worker_count', 1)
@@ -321,6 +326,8 @@ class ProductionLine:
     # V3.2：换型矩阵（配方/规格 A → B 的切换时长，分钟）
     changeover_matrix: Dict[str, Dict[str, float]] = field(default_factory=dict)
     
+    output_unit: str = ""  # 空值使用新建模型默认单位；旧文件加载时显式补历史单位
+
     def add_station(self, station: Station) -> None:
         """
         添加一个工序到产线
@@ -744,11 +751,13 @@ class ProductionLine:
         """
         获取当前生产类型的计量单位
 
-        - 烟弹组装：颗
-        - 烟油灌装：千克
-        - 尼古丁袋：袋
+        离散工序优先使用显式单位标签；旧文件加载时补历史单位。
+        液体批次始终按千克计算，不在这里执行单位换算。
         """
-        return UNIT_LABELS.get(self.production_type, "颗")
+        if self.production_type == ProductionType.LIQUID_FILLING:
+            return "千克"
+        default = "袋" if self.production_type == ProductionType.POUCH_PACKAGING else "件"
+        return self.output_unit or default
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -763,6 +772,7 @@ class ProductionLine:
             'break_minutes': self.break_minutes,
             'worker_hourly_wage': self.worker_hourly_wage,
             'production_type': self.production_type.value,
+            'output_unit': self.get_unit(),
             'recipes': [r.to_dict() for r in self.recipes],
             'batches': [b.to_dict() for b in self.batches],
             'tanks': [t.to_dict() for t in self.tanks],
@@ -798,6 +808,8 @@ class ProductionLine:
             break_minutes=data.get('break_minutes', 60),
             worker_hourly_wage=data.get('worker_hourly_wage', 20.0),
             production_type=ProductionType(data.get('production_type', 'assembly')),
+            output_unit=data.get('output_unit', UNIT_LABELS[
+                ProductionType(data.get('production_type', 'assembly'))]),
             recipes=[Recipe.from_dict(r) for r in data.get('recipes', [])],
             batches=[Batch.from_dict(b) for b in data.get('batches', [])],
             tanks=[Tank.from_dict(t) for t in data.get('tanks', [])],

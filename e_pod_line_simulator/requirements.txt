@@ -6,7 +6,9 @@ pandas>=1.5.0         # 数据处理库 - 用于Excel导入和数据处理
 openpyxl>=3.0.0        # Excel文件读写 - 用于导入/导出Excel配置
 reportlab>=4.0.0      # PDF生成 - 用于导出报告
 
-# GUI依赖（Tkinter是Python标准库，无需安装）
+# GUI：固定兼容Python 3.8的现代控件层（Tkinter仍是系统依赖）
+ttkbootstrap==1.10.1
+pillow>=9.1.0
 # 注意：某些Linux发行版可能需要单独安装tkinter
 # Ubuntu/Debian: sudo apt-get install python3-tk
 # CentOS/RHEL: sudo yum install tkinter

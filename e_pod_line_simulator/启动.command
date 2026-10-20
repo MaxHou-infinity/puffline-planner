@@ -16,7 +16,7 @@ for cand in \
   "python3"
 do
   if command -v "$cand" >/dev/null 2>&1; then
-    if "$cand" -c "import simpy, pandas, openpyxl, reportlab" >/dev/null 2>&1; then
+    if "$cand" -c "import simpy, pandas, openpyxl, reportlab, ttkbootstrap; from PIL import Image; from importlib.metadata import version; assert version('ttkbootstrap') == '1.10.1'; Image.Resampling.LANCZOS" >/dev/null 2>&1; then
       PY="$cand"
       break
     fi
@@ -42,7 +42,7 @@ if [ -z "$PY" ]; then
     exit 1
   fi
 
-  osascript -e 'display dialog "首次启动需要安装依赖（simpy / pandas / openpyxl / reportlab），是否继续？" buttons {"取消", "安装"} default button "安装"' >/dev/null 2>&1 || exit 1
+  osascript -e 'display dialog "启动需要安装或更新依赖（仿真、报表及现代界面控件），是否继续？" buttons {"取消", "安装"} default button "安装"' >/dev/null 2>&1 || exit 1
   "$PY" -m pip install -r requirements.txt || {
     osascript -e 'display dialog "依赖安装失败，请检查网络后重试。" buttons {"知道了"} default button "知道了"' >/dev/null 2>&1
     exit 1

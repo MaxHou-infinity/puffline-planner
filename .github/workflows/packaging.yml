@@ -73,6 +73,7 @@ jobs:
             --icon "assets/puffline-icon.ico" `
             --add-data "assets;assets" `
             --add-data "configs;configs" `
+            --collect-all ttkbootstrap `
             --disable-windowed-traceback `
             run.py
 

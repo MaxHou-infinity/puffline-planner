@@ -12,7 +12,7 @@ def _check_supported(line, cancel_event) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise CancelledError()
     if line.production_type == ProductionType.LIQUID_FILLING:
-        raise ValueError('烟油采用配方批次模型，暂不支持工序人数/节拍敏感性和批量试算')
+        raise ValueError('液体批次采用配方批次模型，暂不支持工序人数/节拍敏感性和批量试算')
 
 
 def _simulate(line, duration_hours, warmup_minutes, simulation_seed, cancel_event) -> Dict:

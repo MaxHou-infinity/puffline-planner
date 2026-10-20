@@ -5,7 +5,7 @@
 避免多处维护导致版本不一致。
 """
 
-__version__ = "3.4.0"
+__version__ = "3.5.0"
 VERSION_STRING = f"v{__version__}"
 PRODUCT_NAME = "PuffLine Planner"
 

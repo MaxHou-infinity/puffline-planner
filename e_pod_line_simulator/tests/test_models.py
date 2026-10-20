@@ -84,7 +84,7 @@ def test_daily_cost_and_output_formula():
     assert line.calculate_total_cost() == 3 * 20.0 * 8
 
     # 日产量在真实班次内扣除休息与一次计划换型，不固定按8h摊销。
-    effective_hours = 8 - 60 / 60 - 45 / 60
+    effective_hours = 8 - 60 / 60  # 新建工序默认不假定计划换型
     assert line.calculate_daily_output() == pytest.approx(
         line.get_bottleneck_capacity() * effective_hours,
         rel=1e-9,
@@ -158,7 +158,7 @@ def test_production_type_default_and_serialization():
 
 
 def test_unit_follows_production_type():
-    assert ProductionLine("A").get_unit() == "颗"
+    assert ProductionLine("A").get_unit() == "件"
     assert create_liquid_line().get_unit() == "千克"
     assert create_pouch_line().get_unit() == "袋"
 
