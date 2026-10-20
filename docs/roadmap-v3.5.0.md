@@ -1,6 +1,6 @@
 # v3.5.0 开发路线图与接续记录
 
-状态：基础去行业化与A桌面界面本地验证完成；2026-10-20所有者授权推送、标签及Release，正在执行发布验证。创建日期：2026-10-19。
+状态：v3.5.0已于2026-10-20发布，双平台CI、三类附件构建与摘要核验通过；Windows完整人工交互、Python3.8实测和真实工厂参数验收仍待完成。创建日期：2026-10-19。
 
 ## 目标与授权范围
 
@@ -20,7 +20,8 @@
 | M6 | 跨行业回归与文档 | 本地验证完成 | 全套 pytest、核心覆盖率、GUI 启动与示例验证 |
 
 | M7 | 清爽专业界面样稿 | 所有者已确认 | 主界面与编辑器可操作、所有者确认观感 |
-| M8 | 桌面控件现代化迁移 | 本地macOS验证完成 | 确定控件方案后迁移，完整回归与双平台验证 |
+| M8 | 桌面控件现代化迁移 | macOS桌面验证、双平台CI/构建通过 | Windows完整人工交互仍待完成 |
+| M9 | 推送、标签与Release | 已完成 | v3.5.0标签、公开Release、三个附件完整性与摘要核验 |
 
 ## 设计约定
 
@@ -90,8 +91,8 @@ PYTHONDONTWRITEBYTECODE=1 PUFFLINE_DATA_DIR=/private/tmp/puffline-v350-data \
 待后续处理：
 
 1. 所有者以真实硬件产线测时参数验收，确认模板与字段是否满足首个使用场景。
-2. 获得明确发布授权后再提交/推送，并运行双平台CI、打包及分发包核验。
-3. Windows完整人工交互、本版分发包尚未验证；不得把本机macOS通过写为跨平台验收完成。
+2. 发布授权及执行已于2026-10-20完成，证据见阶段7—8。
+3. Windows完整人工交互及Python3.8实际运行尚未验证；双平台CI/构建与Windows启动冒烟已通过，不能等同于完整人工验收。
 4. 后续模型扩展继续遵守本文件“后续范围”，不得静默纳入3.5.0。
 
 ### 阶段 4：界面现代化方向A（2026-10-19）
@@ -204,3 +205,21 @@ PUFFLINE_GUI_TESTS=1 PUFFLINE_DATA_DIR=/private/tmp/puffline-ui-modern-native \
 - 接下来重跑常规覆盖率与真实桌面专项，通过后提交并推送main；双平台CI通过后创建v3.5.0标签，核验三类Release附件。
 - Windows完整人工交互、Python3.8实际运行及真实工厂测时仍不在已完成验收之列。
 - 发布前本机全套覆盖率复验：323 passed、1 skipped（19.67秒），核心91.44%；真实桌面专项另行1 passed（1.16秒）。启动器依赖探针、bash语法与git diff --check通过。
+- 发布提交12dbb8420db7d5c7251a0fdf40ca4587f8989ee4已推送main；双平台CI：[39347646951](https://github.com/MaxHou-infinity/puffline-planner/actions/runs/39347646951)。第三方许可文本仅规范为LF换行，内容未改。
+- 双平台Python3.12 CI均成功；v3.5.0注释标签已推送并指向12dbb84。Release草稿已创建，构建/上传流水线：[39347912296](https://github.com/MaxHou-infinity/puffline-planner/actions/runs/39347912296)。附件核验通过前不将草稿公开。
+- 远端CI逐平台证据：macOS 323 passed、1 skipped（63.64秒），核心91.66%；Windows 323 passed、1 skipped（70.28秒），核心91.62%。与本机Python3.13覆盖率范围相同，平台差异未影响85%门槛。
+
+### 阶段 8：正式发布与分发物核验（2026-10-20）
+
+- 发布代码提交：`12dbb8420db7d5c7251a0fdf40ca4587f8989ee4`；注释标签`v3.5.0`远端解析为同一提交。
+- Packaging流水线39347912296全部成功：源码ZIP、macOS App、Windows EXE、Windows启动冒烟及Release附件上传。
+- 三个附件已实际下载，ZIP CRC通过；文件字节数和SHA-256与GitHub附件元数据一致。源码版本、硬件示例、现代控件模块、macOS Info.plist版本、Windows EXE与主题资源、三包主题许可文件检查通过。
+- Release已于北京时间2026-10-20 08:33公开，非草稿、非预发布，并设为最新版本：[v3.5.0](https://github.com/MaxHou-infinity/puffline-planner/releases/tag/v3.5.0)。Release正文包含验证链接、使用边界及SHA-256。
+- 最终待办仍为真实工厂测时验收、Windows完整人工交互与Python3.8实际运行；本次不增加后续范围中的模型能力。
+- 本文件发布结果作为独立文档提交同步main；v3.5.0标签保留在已验证的发布代码提交，不移动标签。
+
+| 附件 | 字节数 | SHA-256 |
+|---|---:|---|
+| PuffLine-Planner-macOS-v3.5.0.zip | 47043190 | `26b2dd4af3418304cff535ea675fb1005f8daf99267e72c56832ff015283e0b2` |
+| PuffLine-Planner-Windows-v3.5.0.zip | 51280210 | `a2c45d3a989fd6df03150c834d06fc6dc86500f9119f11921199316d0e5f888a` |
+| PuffLine-Planner-v3.5.0.zip | 10589212 | `749988a91c3d97795d99f0f56cffb6388080a76e38a6b94b27d6a2459047d028` |
