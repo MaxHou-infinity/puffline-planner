@@ -111,6 +111,45 @@ def capacity_heading(unit: str) -> str:
     return "产能"
 
 
+def station_column_spec() -> dict:
+    """左侧工序列表列宽。
+
+    非拉伸列的 width 之和加上名称列 minwidth，要能放进约 1280 宽窗口的
+    左侧树（大约 300px），这样表头不用横向滚动。
+    """
+    return {
+        "name": {"width": 96, "minwidth": 72, "stretch": True},
+        "time": {"width": 84, "minwidth": 76, "stretch": False},
+        "workers": {"width": 44, "minwidth": 40, "stretch": False},
+        "capacity": {"width": 72, "minwidth": 64, "stretch": False},
+    }
+
+
+def place_dialog_on_screen(
+    screen_w: int,
+    screen_h: int,
+    req_w: int,
+    req_h: int,
+    min_w: int = 640,
+    min_h: int = 420,
+    margin_x: int = 40,
+    margin_y: int = 64,
+) -> tuple:
+    """把对话框宽高和坐标限制在屏幕内，标题栏和底边都留得住。"""
+    screen_w = max(int(screen_w), 1)
+    screen_h = max(int(screen_h), 1)
+    avail_w = max(320, screen_w - margin_x)
+    avail_h = max(280, screen_h - margin_y)
+    width = min(max(int(req_w), min_w), avail_w)
+    height = min(max(int(req_h), min_h), avail_h)
+    # 屏幕比最小尺寸还小时继续缩小，避免把窗口顶到屏幕外。
+    width = min(width, max(200, screen_w - 16))
+    height = min(height, max(200, screen_h - 32))
+    x = max(0, (screen_w - width) // 2)
+    y = max(0, (screen_h - height) // 2)
+    return width, height, x, y
+
+
 def history_actual_cost_text(kpis) -> str:
     """历史表「本次」列只读 actual_unit_cost；未仿真的快照没有该字段。"""
     if not isinstance(kpis, dict) or "actual_unit_cost" not in kpis:
@@ -448,8 +487,8 @@ class ConfigPanel(ttk.Frame):
         """创建界面组件"""
         # 标题 + 术语速查
         title_frame = ttk.Frame(self)
-        title_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(title_frame, text="工序配置", font=(resolve_font_family(), 12, 'bold')).pack(side=tk.LEFT, padx=5)
+        title_frame.pack(fill=tk.X, pady=(2, 1))
+        ttk.Label(title_frame, text="工序配置", style="Section.TLabel").pack(side=tk.LEFT, padx=5)
         self.production_type_label = ttk.Label(
             title_frame,
             text="类型：通用离散装配",
@@ -468,7 +507,7 @@ class ConfigPanel(ttk.Frame):
         
         # 按钮框架
         button_frame = ttk.Frame(self)
-        button_frame.pack(fill=tk.X, padx=5, pady=5)
+        button_frame.pack(fill=tk.X, padx=5, pady=(2, 2))
         
         # 添加按钮
         self.btn_add = ttk.Button(button_frame, text="添加", command=self._btn_add)
@@ -491,7 +530,7 @@ class ConfigPanel(ttk.Frame):
         
         # 创建Treeview（表格视图）
         columns = ('name', 'time', 'workers', 'capacity')
-        self.tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=15)
+        self.tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=12)
         
         # 设置列标题
         self.tree.heading('name', text='工序名称')
@@ -499,11 +538,9 @@ class ConfigPanel(ttk.Frame):
         self.tree.heading('workers', text='人数')
         self.tree.heading('capacity', text=capacity_heading('颗'))
         
-        # 名称列吃剩余宽度；节拍和产能固定，避免窄栏把「产能」裁掉。
-        self.tree.column('name', width=100, minwidth=64, stretch=True)
-        self.tree.column('time', width=88, minwidth=80, stretch=False)
-        self.tree.column('workers', width=48, minwidth=42, stretch=False)
-        self.tree.column('capacity', width=84, minwidth=76, stretch=False)
+        # 宽度来自 station_column_spec()，保证四列表头能在笔记本左侧栏看全。
+        for column_id, options in station_column_spec().items():
+            self.tree.column(column_id, **options)
         
         # 绑定选择事件
         self.tree.bind('<<TreeviewSelect>>', self._on_select)
@@ -743,7 +780,7 @@ class KPIDashboard(ttk.LabelFrame):
                 text="--",
                 bg=COLORS['surface'],
                 fg=COLORS['text'],
-                font=(family, -23, 'bold'),
+                font=(family, -20, 'bold'),
             )
             value_label.pack()
             if key == 'total_cost':
@@ -934,7 +971,7 @@ class AlertPanel(ttk.LabelFrame):
     
     def __init__(self, parent):
         """初始化报警面板"""
-        super().__init__(parent, text="分析提醒", padding=12)
+        super().__init__(parent, text="分析提醒", padding=8)
         self._alerts: List[Alert] = []
         self._collapsed = False
 
@@ -4213,10 +4250,10 @@ class WizardDialog:
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("快速配置向导")
-        self.dialog.geometry("680x480")
-        self.dialog.resizable(False, False)
         self.dialog.transient(parent)
-        self.dialog.grab_set()
+        self.dialog.minsize(560, 360)
+        # 打开时钉在正文顶部。用户滚动之后才放开，避免一打开就停在底部。
+        self._stick_top = True
 
         self.template_var = tk.StringVar(value="standard")
         self.excel_path_var = tk.StringVar(value="")
@@ -4235,29 +4272,55 @@ class WizardDialog:
         self.production_type_var.trace_add("write", self._on_template_change)
         self.dialog.bind('<Escape>', lambda e: self.dialog.destroy())
         self._show_step(0)
-
-        # 居中显示
-        self.dialog.update_idletasks()
-        x = (self.dialog.winfo_screenwidth() - self.dialog.winfo_width()) // 2
-        y = (self.dialog.winfo_screenheight() - self.dialog.winfo_height()) // 2
-        self.dialog.geometry(f"+{x}+{y}")
-
+        self._place_dialog()
+        self._pin_scroll_top()
+        # Configure 会在映射后再改滚动区域，idle 和稍后各钉一次顶部。
+        self.dialog.after_idle(self._pin_scroll_top)
+        self.dialog.after(50, self._pin_scroll_top)
+        try:
+            self.dialog.grab_set()
+        except tk.TclError:
+            pass
         self.dialog.wait_window()
 
     def _create_widgets(self) -> None:
-        """创建界面组件"""
-        self.main_frame = ttk.Frame(self.dialog, padding=15)
+        """创建界面组件。底栏先占位，正文放进可滚动区域。"""
+        self.main_frame = ttk.Frame(self.dialog, padding=(12, 10))
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 步骤提示
-        self.step_label = ttk.Label(self.main_frame, font=(resolve_font_family(), 12, 'bold'))
-        self.step_label.pack(anchor=tk.W, pady=(0, 10))
+        # 先 pack 底栏，窗口变矮时取消/下一步不会被挤成一条缝。
+        button_frame = ttk.Frame(self.main_frame)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        self.btn_prev = ttk.Button(button_frame, text="上一步", command=self._prev)
+        self.btn_prev.pack(side=tk.LEFT)
+        self.btn_cancel = ttk.Button(button_frame, text="取消", command=self._cancel)
+        self.btn_cancel.pack(side=tk.LEFT, padx=5)
+        self.btn_next = ttk.Button(button_frame, text="下一步", command=self._next)
+        self.btn_next.pack(side=tk.RIGHT)
 
-        # 步骤内容容器
-        self.step_container = ttk.Frame(self.main_frame)
-        self.step_container.pack(fill=tk.BOTH, expand=True)
+        self.step_label = ttk.Label(self.main_frame, style="Section.TLabel")
+        self.step_label.pack(anchor=tk.W, pady=(0, 8))
 
-        # 创建四个步骤的页面
+        self._body_canvas = tk.Canvas(
+            self.main_frame,
+            height=400,
+            highlightthickness=0,
+            bg=COLORS["surface"],
+            takefocus=False,
+        )
+        self._body_scroll = ttk.Scrollbar(
+            self.main_frame, orient=tk.VERTICAL, command=self._body_canvas.yview
+        )
+        self._body_canvas.configure(yscrollcommand=self._body_scroll.set)
+        self._body_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._body_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.step_container = ttk.Frame(self._body_canvas)
+        self._body_window = self._body_canvas.create_window(
+            (0, 0), window=self.step_container, anchor="nw"
+        )
+        self.step_container.bind("<Configure>", self._sync_body_scroll)
+        self._body_canvas.bind("<Configure>", self._fit_body_width)
+
         self.page_template = ttk.Frame(self.step_container)
         self.page_source = ttk.Frame(self.step_container)
         self.page_shift = ttk.Frame(self.step_container)
@@ -4267,17 +4330,83 @@ class WizardDialog:
         self._build_page_source()
         self._build_page_shift()
         self._build_page_finish()
+        self._bind_body_wheel(self._body_canvas)
 
-        # 底部按钮
-        button_frame = ttk.Frame(self.main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
+    def _sync_body_scroll(self, _event=None) -> None:
+        """内容变高时更新滚动范围；未手动滚动前保持在第一步顶部。"""
+        canvas = getattr(self, "_body_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0))
+            if self._stick_top:
+                canvas.yview_moveto(0)
+        except tk.TclError:
+            return
 
-        self.btn_prev = ttk.Button(button_frame, text="上一步", command=self._prev)
-        self.btn_prev.pack(side=tk.LEFT)
-        self.btn_cancel = ttk.Button(button_frame, text="取消", command=self._cancel)
-        self.btn_cancel.pack(side=tk.LEFT, padx=5)
-        self.btn_next = ttk.Button(button_frame, text="下一步", command=self._next)
-        self.btn_next.pack(side=tk.RIGHT)
+    def _fit_body_width(self, event) -> None:
+        """正文跟视口同宽，避免向导内部再出现横向滚动。"""
+        try:
+            self._body_canvas.itemconfigure(self._body_window, width=event.width)
+            if self._stick_top:
+                self._body_canvas.yview_moveto(0)
+        except tk.TclError:
+            return
+
+    def _pin_scroll_top(self) -> None:
+        """把向导正文滚回顶部，让第一步选项和标题可见。"""
+        self._stick_top = True
+        canvas = getattr(self, "_body_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.update_idletasks()
+            canvas.yview_moveto(0)
+        except tk.TclError:
+            return
+
+    def _place_dialog(self) -> None:
+        """按屏幕夹紧窗口，一次写上宽高和坐标，避免只改位置把尺寸丢掉。"""
+        self.dialog.update_idletasks()
+        req_w = max(self.dialog.winfo_reqwidth(), 680)
+        req_h = min(max(self.dialog.winfo_reqheight(), 480), 560)
+        width, height, x, y = place_dialog_on_screen(
+            self.dialog.winfo_screenwidth(),
+            self.dialog.winfo_screenheight(),
+            req_w,
+            req_h,
+        )
+        self.dialog.geometry(f"{width}x{height}+{x}+{y}")
+        self.dialog.minsize(min(560, width), min(360, height))
+
+    def _bind_body_wheel(self, widget) -> None:
+        """正文超出视口时用滚轮滚动，并停止强制回顶。"""
+        def wheel(event):
+            canvas = self._body_canvas
+            try:
+                if self.step_container.winfo_reqheight() <= canvas.winfo_height():
+                    return
+            except tk.TclError:
+                return
+            number = getattr(event, "num", None)
+            delta = getattr(event, "delta", 0) or 0
+            if number == 4 or delta > 0:
+                steps = -1
+            elif number == 5 or delta < 0:
+                steps = 1
+            else:
+                return
+            self._stick_top = False
+            canvas.yview_scroll(steps, "units")
+            return "break"
+
+        # 摘要文本自己有滚动条，不抢走它的滚轮。
+        if not isinstance(widget, tk.Text):
+            widget.bind("<MouseWheel>", wheel, add="+")
+            widget.bind("<Button-4>", wheel, add="+")
+            widget.bind("<Button-5>", wheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_body_wheel(child)
 
     def _build_page_template(self) -> None:
         """步骤 1：模板选择"""
@@ -4505,8 +4634,9 @@ class WizardDialog:
         return build_template_line(self.template_var.get())
 
     def _show_step(self, index: int) -> None:
-        """切换步骤页面"""
+        """切换步骤页面，并回到该步顶部。"""
         self.step_index = index
+        self._stick_top = True
         pages = [self.page_template, self.page_source, self.page_shift, self.page_finish]
         titles = ["第 1 步 / 共 4 步：选择模板", "第 2 步 / 共 4 步：数据来源", "第 3 步 / 共 4 步：班次设置", "第 4 步 / 共 4 步：完成"]
         for i, page in enumerate(pages):
@@ -4515,11 +4645,23 @@ class WizardDialog:
         self.step_label.config(text=titles[index])
         self.btn_prev.config(state=tk.NORMAL if index > 0 else tk.DISABLED)
         self.btn_next.config(text="完成" if index == len(pages) - 1 else "下一步")
+        self._pin_scroll_top()
         if index == 2:
             # 页面切换后聚焦首个输入，同时使macOS刷新刚映射的表单控件。
-            self.dialog.after_idle(self.shift_hours_entry.focus_set)
+            self.dialog.after_idle(self._focus_shift_hours)
+        else:
+            self.dialog.after_idle(self._pin_scroll_top)
         if index == len(pages) - 1:
             self._refresh_summary()
+
+    def _focus_shift_hours(self) -> None:
+        """聚焦班次时长，但仍把该步留在视口顶部。"""
+        self._pin_scroll_top()
+        try:
+            self.shift_hours_entry.focus_set()
+        except tk.TclError:
+            return
+        self._pin_scroll_top()
 
     def _refresh_summary(self) -> None:
         """刷新完成页摘要"""

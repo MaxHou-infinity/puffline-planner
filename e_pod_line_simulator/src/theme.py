@@ -180,9 +180,10 @@ def apply_theme(root) -> dict:
             }))
     style.theme_use('puffline')
     root._puffline_style = style  # 保持主题图像资源与当前Tk解释器同生命周期。
+    # 字号和内边距收一档：主界面按钮、表头不要占满笔记本窗口。
     style.configure(
         '.',
-        font=(family, -14),
+        font=(family, -13),
         background=COLORS['surface'],
         foreground=COLORS['text'],
     )
@@ -194,9 +195,9 @@ def apply_theme(root) -> dict:
         'TLabelframe.Label',
         background=COLORS['surface'],
         foreground=COLORS['text'],
-        font=(family, -14, 'bold'),
+        font=(family, -12, 'bold'),
     )
-    style.configure('TButton', font=(family, -14), padding=(12, 8),
+    style.configure('TButton', font=(family, -13), padding=(8, 3),
                     background=COLORS['surface'], foreground=COLORS['text'],
                     bordercolor=COLORS['border'], borderwidth=1, relief='flat')
     style.map('TButton', background=[('disabled', COLORS['bg']), ('active', COLORS['hover'])],
@@ -208,7 +209,7 @@ def apply_theme(root) -> dict:
         background=COLORS['button_primary'],
         foreground=COLORS['surface'],
         font=(family, 11),
-        padding=(12, 6),
+        padding=(8, 3),
     )
     style.map(
         'Primary.TButton',
@@ -221,14 +222,14 @@ def apply_theme(root) -> dict:
         background=COLORS['danger_soft'],
         foreground=COLORS['danger_dark'],
         bordercolor=COLORS['danger_dark'],
-        padding=(12, 6),
+        padding=(8, 3),
     )
     style.map('Danger.TButton', background=[('active', COLORS['danger_soft_hover'])])
     style.configure(
         'Secondary.TButton',
         background=COLORS['surface'],
         foreground=COLORS['text'],
-        padding=(12, 6),
+        padding=(8, 3),
     )
     style.map('Secondary.TButton', background=[('active', COLORS['hover'])])
     style.configure(
@@ -244,10 +245,10 @@ def apply_theme(root) -> dict:
         background=COLORS['surface'],
         fieldbackground=COLORS['surface'],
         foreground=COLORS['text'],
-        rowheight=40,
+        rowheight=28,
         borderwidth=0,
         relief='flat',
-        font=(family, -14),
+        font=(family, -13),
         selectbackground=COLORS['primary_soft'],
         selectforeground=COLORS['primary'],
     )
@@ -255,7 +256,7 @@ def apply_theme(root) -> dict:
         'Treeview.Heading',
         font=(family, -12),
         relief='flat',
-        padding=(8, 10),
+        padding=(4, 3),
         background=COLORS['surface'],
         foreground=COLORS['text'],
     )
@@ -263,7 +264,7 @@ def apply_theme(root) -> dict:
         'TEntry',
         fieldbackground=COLORS['surface'],
         bordercolor=COLORS['border'],
-        padding=(9, 7),
+        padding=(6, 3),
         relief='flat',
     )
     style.map(
@@ -274,14 +275,14 @@ def apply_theme(root) -> dict:
     style.configure('TCombobox', fieldbackground=COLORS['surface'], bordercolor=COLORS['border'])
     style.map('TCombobox', bordercolor=[('focus', COLORS['focus'])])
 
-    style.configure('TCombobox', padding=(9, 7), arrowsize=14)
+    style.configure('TCombobox', padding=(6, 3), arrowsize=12)
     style.map('TCombobox', fieldbackground=[('readonly', COLORS['surface'])],
               foreground=[('readonly', COLORS['text'])])
     style.map('Treeview', background=[('selected', COLORS['primary_soft'])],
               foreground=[('selected', COLORS['primary'])])
     style.configure('TSeparator', background=COLORS['border'])
-    style.configure('Heading.TLabel', font=(family, -19, 'bold'))
-    style.configure('Section.TLabel', font=(family, -13, 'bold'))
+    style.configure('Heading.TLabel', font=(family, -16, 'bold'))
+    style.configure('Section.TLabel', font=(family, -12, 'bold'))
     from src.ui_controls import install_control_elements
     install_control_elements(root, style, COLORS)
     root.configure(bg=COLORS['bg'])
@@ -293,7 +294,7 @@ def apply_theme(root) -> dict:
     root.option_add('*Listbox.background', COLORS['surface'])
     root.option_add('*selectBackground', COLORS['primary_soft'])
     root.option_add('*selectForeground', COLORS['primary'])
-    root.option_add('*Font', (family, 11))
+    root.option_add('*Font', (family, 10))
     return palette
 
 
