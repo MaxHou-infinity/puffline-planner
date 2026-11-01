@@ -54,6 +54,7 @@ from src.gui_panels import (
     ChangeoverDialog,
     HelpDialog,
     format_cost,
+    format_liquid_readonly_summary,
 )
 from src.utils import (
     validate_production_line,
@@ -271,20 +272,33 @@ class MainWindow:
         self.empty_banner = ttk.Frame(canvas_frame)
         ttk.Label(
             self.empty_banner,
-            text="还没有配置工序，点下方按钮一键生成示例产线：",
+            text="主路径：打开配置或向导 → 计算本班结果 → 看瓶颈与报告。墙钟动画是可选演示。",
             foreground=COLORS["text_secondary"],
-        ).pack(side=tk.LEFT, padx=(0, 8))
+            wraplength=720,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(0, 6))
+        empty_actions = ttk.Frame(self.empty_banner)
+        empty_actions.pack(anchor=tk.W)
         ttk.Button(
-            self.empty_banner,
+            empty_actions,
             text="打开快速配置向导",
             command=self._menu_wizard,
             style="Accent.TButton",
         ).pack(side=tk.LEFT)
         ttk.Button(
-            self.empty_banner,
+            empty_actions,
             text="打开示例配置",
             command=self._open_hardware_example,
         ).pack(side=tk.LEFT, padx=(8, 0))
+        self.liquid_banner = ttk.LabelFrame(canvas_frame, text="液体批次只读摘要", padding=8)
+        self.liquid_summary = ttk.Label(
+            self.liquid_banner,
+            text="",
+            justify=tk.LEFT,
+            wraplength=760,
+            foreground=COLORS["text_secondary"],
+        )
+        self.liquid_summary.pack(anchor=tk.W, fill=tk.X)
 
         canvas_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
@@ -332,14 +346,14 @@ class MainWindow:
             control_frame,
             text="开始仿真",
             command=self._btn_start_simulation,
-            style="Accent.TButton",
+            style="Secondary.TButton",
         )
         self.btn_start.pack(side=tk.LEFT, padx=5)
         self.btn_compute = ttk.Button(
             control_frame,
             text="计算本班结果",
             command=self._btn_compute_shift,
-            style="Secondary.TButton",
+            style="Accent.TButton",
         )
         self.btn_compute.pack(side=tk.LEFT, padx=5)
         ToolTip(
@@ -415,7 +429,7 @@ class MainWindow:
         self.btn_save_scenario.pack(side=tk.LEFT, padx=5)
 
         # 关键控件 Tooltip（V1.2.0）
-        ToolTip(self.btn_start, "开始仿真（空格）")
+        ToolTip(self.btn_start, "可选：播放墙钟动画演示（空格）。不改变本班计算口径。")
         ToolTip(self.btn_pause, "暂停仿真（空格）")
         ToolTip(self.btn_stop, "停止仿真")
         ToolTip(self.btn_config_shift, "配置班次时长 / 休息时间 / 时薪")
@@ -555,14 +569,28 @@ class MainWindow:
         """空产线引导横幅：无工序时显示，有工序时隐藏"""
         if not hasattr(self, 'empty_banner'):
             return
-        if has_stations:
-            self.empty_banner.pack_forget()
-            self.btn_start.config(style="Accent.TButton")
-        else:
-            self.btn_start.config(style="Secondary.TButton")
+        self.empty_banner.pack_forget()
+        if hasattr(self, "liquid_banner"):
+            self.liquid_banner.pack_forget()
+        if not has_stations:
             self.empty_banner.pack(
                 fill=tk.X, padx=5, pady=(5, 0), before=self.canvas_viewport
             )
+        self._update_liquid_summary()
+
+    def _update_liquid_summary(self) -> None:
+        """液体产线在主界面保留只读摘要，避免看起来能改配方或换型矩阵。"""
+        if not hasattr(self, "liquid_banner"):
+            return
+        line = self.production_line
+        summary = format_liquid_readonly_summary(line)
+        if not summary:
+            self.liquid_banner.pack_forget()
+            return
+        self.liquid_summary.config(text=summary)
+        self.liquid_banner.pack(
+            fill=tk.X, padx=5, pady=(5, 0), before=self.canvas_viewport
+        )
 
     def _update_status_meta(self) -> None:
         """状态栏右侧：当前生产类型与计量单位"""
@@ -579,9 +607,12 @@ class MainWindow:
         ptype = type_map.get(self.production_line.production_type, "通用离散装配")
         if hasattr(self, 'project_title'):
             self.project_title.config(text=self.production_line.name)
+            readonly = ""
+            if self.production_line.production_type == ProductionType.LIQUID_FILLING:
+                readonly = "　/　配方、罐容、换型矩阵只读"
             self.project_subtitle.config(text=(
                 f"{ptype}　/　{self.production_line.shift_hours}小时班次　/　"
-                f"产出单位：{self.production_line.get_unit()}"))
+                f"产出单位：{self.production_line.get_unit()}{readonly}"))
         self.status_meta.config(
             text=f"生产类型：{ptype}　|　单位：{self.production_line.get_unit()}/h"
         )
@@ -983,9 +1014,9 @@ class MainWindow:
             })
         columns = [
             ("label", "方案", 120, tk.W),
-            ("output", "总产出", 90, tk.E),
-            ("unit_cost", "理论单位人工成本", 130, tk.E),
-            ("actual_unit_cost", "实际单位人工成本", 130, tk.E),
+            ("output", "本次总产出", 90, tk.E),
+            ("unit_cost", "预计单位人工成本", 130, tk.E),
+            ("actual_unit_cost", "本次单位人工成本", 130, tk.E),
             ("delta_output", "Δ产出", 80, tk.E),
             ("delta_unit_cost", "Δ单位成本", 100, tk.E),
             ("feasible", "可行性", 70, tk.W),
@@ -1027,8 +1058,8 @@ class MainWindow:
             highlight_value="基线",
             actions=[("应用最优建议", _apply_best)],
             help_text=(
-                "总产出为末端良品；理论单位人工成本=预计日人工÷理论日产量；"
-                "实际单位人工成本=实际窗口人工÷本次仿真良品，零产出不可计算。\n"
+                "本次总产出为末端良品；预计单位人工成本=预计日人工÷预计日产量；"
+                "本次单位人工成本=实际窗口人工÷本次仿真良品，零产出不可计算。\n"
                 "「应用最优建议」会把首个 Δ产出>0（或 Δ单位成本<0）的方案"
                 "应用到当前产线。"
             ),
@@ -1718,8 +1749,9 @@ class MainWindow:
         if (self.production_line
                 and self.production_line.production_type == ProductionType.LIQUID_FILLING):
             messagebox.showinfo(
-                "请配置配方换型", "液体采用配方批次模型，请在配置中的配方换型矩阵定义换型；"
-                "当前不支持离散工序手动停机。"
+                "不能在这里改换型",
+                "液体采用配方批次模型。主界面不能修改配方或换型矩阵，"
+                "请用 Excel 模板再导入；当前也不支持离散工序手动停机。"
             )
             return
         if not self.simulation_engine or not self.simulation_engine.is_running:

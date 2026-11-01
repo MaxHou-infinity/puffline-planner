@@ -346,7 +346,7 @@ class CanvasView(tk.Canvas):
         family = resolve_font_family()
         label_map = {
             "assembly": "类型：通用离散装配",
-            "liquid_filling": "类型：液体批次（配方与储罐近似）",
+            "liquid_filling": "类型：液体批次（配方、罐容、换型只读）",
             "pouch_packaging": "类型：机台包装",
         }
         text = label_map.get(self.production_line.production_type.value, "")

@@ -203,6 +203,31 @@ def test_wizard_preview_uses_final_shift_values():
     line = wizard.production_line
     assert (line.shift_hours, line.break_minutes, line.worker_hourly_wage) == (4, 0, 30)
     assert f'预计日产量：{line.calculate_daily_output():.0f}' in wizard.summary_text.text
+    assert '液体批次只读摘要' not in wizard.summary_text.text
+
+
+def test_liquid_wizard_summary_is_readonly_and_names_excel():
+    from src.gui_panels import format_liquid_readonly_summary
+    from src.templates import build_process_template
+
+    line = build_process_template('liquid_filling')
+    line.changeover_matrix = {'配方A': {'配方B': 15}}
+    text = format_liquid_readonly_summary(line)
+    assert '批次量 100 千克' in text
+    assert '收率 95.0%' in text
+    assert '罐容 500 千克' in text
+    assert 'B001 / 配方A / 100 千克' in text
+    assert '配方A→配方B 15 分钟' in text
+    assert '修改请用 Excel 模板再导入' in text
+    assert '主界面不能修改' in text
+    assert format_liquid_readonly_summary(build_template_line('simple')) == ''
+
+    wizard = WizardDialog.__new__(WizardDialog)
+    wizard.production_line = line
+    wizard.shift_hours_var, wizard.break_minutes_var = Widget('8'), Widget('60')
+    wizard.wage_var, wizard.summary_text = Widget('20'), Widget()
+    wizard._refresh_summary()
+    assert '修改请用 Excel 模板再导入' in wizard.summary_text.text
 
 
 def test_result_table_reads_selected_tree_row():

@@ -180,7 +180,72 @@ CHANGEOVER_HELP = (
     "空闲工序会立即换型，暂停状态下需恢复仿真后执行。"
 )
 
-OEE_INPUT_HINT = "确定性节拍折减，不是随机停机，也不是可用率×性能率×合格率。"
+OEE_INPUT_HINT = "确定性节拍折减，不是经典可用×性能×质量，也不是随机停机。"
+
+# 关于、帮助和主路径共用同一段边界，避免各处各写一套承诺。
+PRODUCT_SCOPE_TEXT = (
+    "【本工具回答】这条线理论上能不能扛：产能、瓶颈，以及加人、节拍、OEE 的试算。\n"
+    "【本工具不回答】这张单能不能交：没有订单、MPS 或交期承诺。\n"
+    "【主路径】打开配置 → 计算本班结果 → 看瓶颈与报告。"
+    "墙钟动画（「开始仿真」）是可选演示，不改变计算口径。"
+)
+
+# 技能矩阵和洁净区仍会随 JSON/Excel 保存，但不能让界面看起来像能派工。
+DATA_FIELD_NOTE = "技能矩阵、洁净区：数据字段，本版不参与派工/界面编辑。"
+
+
+def format_liquid_readonly_summary(line) -> str:
+    """液体批次只读摘要。主界面不编辑配方、罐容或换型矩阵。
+
+    向导完成页和主界面共用这段文字，避免一处说能改、另一处说不能改。
+    """
+    if line is None or getattr(line, "production_type", None) != ProductionType.LIQUID_FILLING:
+        return ""
+    lines = [
+        "【液体批次只读摘要】",
+        "主界面不能修改配方、收率、罐容或换型矩阵。修改请用 Excel 模板再导入。",
+    ]
+    recipes = list(getattr(line, "recipes", []) or [])
+    if not recipes:
+        lines.append("配方：未配置")
+    for recipe in recipes:
+        ingredients = getattr(recipe, "ingredients", None) or {}
+        ingredient_text = "、".join(
+            f"{name} {quantity:g}" for name, quantity in ingredients.items()
+        ) or "未列原料"
+        lines.append(
+            f"配方 {recipe.name}：批次量 {recipe.batch_volume_l:g} 千克，"
+            f"收率 {recipe.yield_rate:.1%}，原料 {ingredient_text}"
+        )
+    tanks = list(getattr(line, "tanks", []) or [])
+    if not tanks:
+        lines.append("储罐：未配置")
+    for tank in tanks:
+        lines.append(f"储罐 {tank.name}（{tank.id}）：罐容 {tank.capacity_l:g} 千克")
+    batches = list(getattr(line, "batches", []) or [])
+    if not batches:
+        lines.append("批次：未配置")
+    else:
+        shown = batches[:6]
+        points = "；".join(
+            f"{batch.id} / {batch.recipe_name} / {batch.quantity_l:g} 千克"
+            for batch in shown
+        )
+        hidden = len(batches) - len(shown)
+        suffix = f"；另有 {hidden} 个批次" if hidden else ""
+        lines.append(f"批次要点：{points}{suffix}")
+    pairs = []
+    matrix = getattr(line, "changeover_matrix", None) or {}
+    for source, targets in matrix.items():
+        if not isinstance(targets, dict):
+            continue
+        for target, minutes in targets.items():
+            pairs.append(f"{source}→{target} {minutes:g} 分钟")
+    if pairs:
+        lines.append("换型矩阵（只读）：" + "；".join(pairs[:8]))
+    else:
+        lines.append("换型矩阵：未定义。主界面不能编辑。")
+    return "\n".join(lines)
 
 
 def scrollable_form(parent, padding=15):
@@ -635,12 +700,12 @@ class KPIDashboard(ttk.LabelFrame):
         
         # 使用Grid布局，6列显示6个KPI（卡片化）
         kpis = [
-            ('bottleneck_capacity', '瓶颈产能', '颗/h'),
+            ('bottleneck_capacity', '预计瓶颈产能', '颗/h'),
             ('daily_output', '预计日产量', '颗'),
-            ('total_cost', '日人工成本', '元'),
-            ('unit_cost', '单位人工成本', '元/颗'),
-            ('balance_rate', '产线平衡率', '%'),
-            ('upph', 'UPPH', '颗/人·h')
+            ('total_cost', '预计日人工成本', '元'),
+            ('unit_cost', '预计单位人工成本', '元/颗'),
+            ('balance_rate', '预计平衡率', '%'),
+            ('upph', '预计 UPPH', '颗/人·h')
         ]
 
         kpi_frame = ttk.Frame(self)
@@ -809,12 +874,12 @@ class KPIDashboard(ttk.LabelFrame):
             return
         parts = []
         for key, label, fmt in [
-            ('batch_cycle_min', '批次周期', '{:.1f} min'),
-            ('batch_pass_rate', '批次合格率', '{:.1%}'),
-            ('yield_rate', '收率', '{:.1%}'),
-            ('machine_oee', '机台OEE', '{:.1%}'),
-            ('cost_per_liter', '元/千克', '{:.2f}'),
-            ('cost_per_pouch', '元/袋', '{:.2f}'),
+            ('batch_cycle_min', '本次批次周期', '{:.1f} min'),
+            ('batch_pass_rate', '本次批次合格率', '{:.1%}'),
+            ('yield_rate', '预计收率', '{:.1%}'),
+            ('machine_oee', '预计机台OEE', '{:.1%}'),
+            ('cost_per_liter', '本次人工元/千克', '{:.2f}'),
+            ('cost_per_pouch', '本次人工元/单位', '{:.2f}'),
         ]:
             if key in kpis and kpis[key]:
                 parts.append(f"{label}: {fmt.format(kpis[key])}")
@@ -1129,7 +1194,20 @@ class StationDialog:
         for value, text in [('parallel', '并联'), ('collaborative', '协同')]:
             ttk.Radiobutton(modes, text=text, variable=self.mode_var, value=value).pack(
                 side=tk.LEFT, padx=(0, 14))
-        _, oee_entry = field("设备综合效率 OEE / 0–1", self.oee_var, 6, 1)
+        # 旁注必须看得见。只放在悬停提示里，用户会把输入 OEE 当成经典三项乘积。
+        oee_label = ttk.Label(
+            main_frame, text="设备综合效率 OEE / 0–1",
+            foreground=COLORS['text_secondary'],
+        )
+        oee_label.grid(row=6, column=1, sticky=tk.W, padx=(0, 18), pady=(2, 7))
+        oee_holder = ttk.Frame(main_frame)
+        oee_holder.grid(row=7, column=1, sticky=tk.EW, padx=(0, 18), pady=(0, 13))
+        oee_entry = ttk.Entry(oee_holder, textvariable=self.oee_var, width=22)
+        oee_entry.pack(anchor=tk.W)
+        ttk.Label(
+            oee_holder, text=OEE_INPUT_HINT, wraplength=250, justify=tk.LEFT,
+            foreground=COLORS['text_secondary'],
+        ).pack(anchor=tk.W, pady=(4, 0))
         ToolTip(oee_entry, OEE_INPUT_HINT)
         self.machine_takt_label, self.machine_takt_entry = field(
             "机台节拍 / 秒", self.machine_takt_var, 8, 0)
@@ -1762,12 +1840,12 @@ class ScenarioCompareDialog:
         unit = self.unit
         kpi_configs = [
             ('total_workers', '总人数', '人', lambda x: f"{int(x)}人"),
-            ('bottleneck_capacity', '瓶颈产能', f'{unit}/h', lambda x: f"{x:.0f}"),
-            ('daily_output', '日产量', unit, lambda x: f"{x:.0f}"),
-            ('total_cost', '日人工成本', '元', lambda x: f"{x:.0f}"),
+            ('bottleneck_capacity', '预计瓶颈产能', f'{unit}/h', lambda x: f"{x:.0f}"),
+            ('daily_output', '预计日产量', unit, lambda x: f"{x:.0f}"),
+            ('total_cost', '预计日人工成本', '元', lambda x: f"{x:.0f}"),
             ('unit_cost', '预计单位人工成本', f'元/{unit}', lambda x: f"{x:.2f}"),
-            ('balance_rate', '产线平衡率', '%', lambda x: f"{x*100:.1f}%"),
-            ('upph', 'UPPH', f'{unit}/人·h', lambda x: f"{x:.1f}")
+            ('balance_rate', '预计平衡率', '%', lambda x: f"{x*100:.1f}%"),
+            ('upph', '预计 UPPH', f'{unit}/人·h', lambda x: f"{x:.1f}")
         ]
 
         self.tree.tag_configure('even', background=COLORS['surface'])
@@ -2206,11 +2284,12 @@ class AboutDialog:
         text = tk.Text(main, height=10, wrap=tk.WORD, font=(family, 10))
         text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         text.insert('1.0', (
+            PRODUCT_SCOPE_TEXT + "\n\n"
             "【隐私声明】\n"
             "本工具完全本地运行，不上传任何数据；产线配置、方案、UI 设置与日志均保存在您的设备上。\n\n"
             "【免责声明】\n"
-            "仿真结果仅供产线设计与人力规划参考，不构成产能或成本承诺；实际投产前请以现场验证为准。"
-            "作者不对因参考仿真结果做出的决策损失承担责任。本工具按“现状”提供。\n\n"
+            "结果只用于产线预评估，不构成产能、成本或交期承诺；实际投产前请以现场验证为准。"
+            "作者不对因参考这些结果做出的决策损失承担责任。本工具按“现状”提供。\n\n"
             "【Bug 反馈】\n"
             f"GitHub Issues：{BUG_REPORT_URL}\n\n"
             "【资助作者】\n"
@@ -2739,19 +2818,19 @@ class HistoryDialog:
     """
 
     KPI_LABELS = {
-        "bottleneck_capacity": "瓶颈产能",
+        "bottleneck_capacity": "预计瓶颈产能",
         "daily_output": "预计日产量",
         "total_cost": "预计日人工成本",
         "unit_cost": "预计单位人工成本",
         "actual_unit_cost": "本次单位人工成本",
         "balance_rate": "预计平衡率",
         "upph": "预计 UPPH",
-        "batch_cycle_min": "批次周期",
-        "batch_pass_rate": "批次合格率",
-        "yield_rate": "收率",
-        "machine_oee": "机台OEE",
-        "shippable_quantity": "可发运产出",
-        "rejected_batches": "隔离批次",
+        "batch_cycle_min": "本次批次周期",
+        "batch_pass_rate": "本次批次合格率",
+        "yield_rate": "预计收率",
+        "machine_oee": "预计机台OEE",
+        "shippable_quantity": "本次可发运产出",
+        "rejected_batches": "本次隔离批次",
     }
 
     def __init__(
@@ -3386,8 +3465,8 @@ class OptimizeDialog:
     """
 
     OBJECTIVE_LABELS = {
-        "unit_cost": "实际单位人工成本最小",
-        "output": "总产出最大",
+        "unit_cost": "本次单位人工成本最小",
+        "output": "本次总产出最大",
     }
 
     def __init__(
@@ -3485,7 +3564,7 @@ class OptimizeDialog:
         HelpSection(
             main,
             "使用说明",
-            "目标：让产线总产出最大或单位成本最小。\n"
+            "目标：让本次总产出最大，或本次单位人工成本最小。\n"
             "搜索参数：每道工序的人数（1-10）、缓冲区容量（10-500）、"
             "机台节拍（仅节拍工序，0.5s ~ 当前×1.5）。\n"
             "迭代代数：遗传算法进化的轮数；代数越多搜索越充分、越接近最优，"
@@ -3494,8 +3573,8 @@ class OptimizeDialog:
             "每代计算越慢。总仿真次数 ≈ 种群 × 代数。\n"
             "锁定工序：在列表中选中工序（可多选）后，该工序参数保持当前值"
             "不参与搜索，适合固定设备/不可变工位。\n"
-            "结果口径：理论单位人工成本=预计日人工÷理论日产量；"
-            "实际单位人工成本=本次人工费用÷末端良品，零产出不可计算。\n"
+            "结果口径：预计单位人工成本=预计日人工÷预计日产量；"
+            "本次单位人工成本=本次人工费用÷末端良品，零产出不可计算。\n"
             "方案运用：在结果表选中某个 TOP 方案，点「应用选中方案」，"
             "该方案的人数/缓冲区/节拍会写入当前产线并刷新主界面，"
             "之后可保存方案或继续仿真验证。",
@@ -3585,9 +3664,9 @@ class OptimizeDialog:
                 })
             columns = [
                 ("rank", "方案", 60, tk.CENTER),
-                ("output", "总产出", 90, tk.E),
-                ("unit_cost", "理论单位人工成本", 130, tk.E),
-                ("actual_unit_cost", "实际单位人工成本", 130, tk.E),
+                ("output", "本次总产出", 90, tk.E),
+                ("unit_cost", "预计单位人工成本", 130, tk.E),
+                ("actual_unit_cost", "本次单位人工成本", 130, tk.E),
                 ("total_cost", "本次人工成本", 110, tk.E),
                 ("params", "参数", 420, tk.W),
             ]
@@ -3899,29 +3978,32 @@ class ResultTableDialog:
 class HelpDialog:
     """使用说明对话框（V3.3.3：与术语/分析指南一致的可滚动窗口）"""
 
-    HELP_TEXT = """【操作步骤】
-1. 首次启动会自动打开「快速配置向导」；之后可用「文件 → 快速配置向导」
-   一键生成产线，「文件 → 打开配置」载入 JSON（如消费硬件示例），
-   或从「方案」导入已有方案
-2. 在主界面添加/编辑工序（参数随生产类型自动适配；
-   液体/包装可设置工种）
-3. 「计算本班结果」立刻算完本班并刷新产出、报警与 KPI 历史；
-   「开始仿真」用于动画演示，运行中可以改速度。
-   运行中可用「停机切换（换型）」模拟更换型号或规格
-   （如零件装配、功能测试）
-4. 保存方案（主界面或「文件 → 保存方案」）；
-   「方案」菜单用于方案管理 / 对比与 KPI 历史趋势
-5. 分析试算：「分析」菜单提供敏感性试算、批量试算、
-   智能优化、人力规划
-6. 需要存档时用「报告 → 导出报告」（Excel / PDF）
-7. 快捷键：Ctrl+S 保存方案、空格 开始/暂停
+    HELP_TEXT = f"""{PRODUCT_SCOPE_TEXT}
 
-【亮点与价值】
-• 把产线设计从"2 周试错"压缩到"2 小时仿真"
-• 支持通用离散装配 / 液体批次（千克）/ 机台包装三种执行模型
-• 智能报警：瓶颈、WIP、饥饿/堵塞、预测预警、根因建议
-• 人力规划：目标产量反推人数、成本、招聘缺口与爬坡达产
-• 统一浅色主题、2026 桌面级交互体验
+【操作步骤】
+1. 打开配置：首次启动会自动打开「快速配置向导」；之后用
+   「文件 → 快速配置向导」或「文件 → 打开配置」载入 JSON
+   （如消费硬件示例），也可从「方案」导入已有方案
+2. 左侧工序配置可改节拍、人数、OEE、人员效率、缓冲区。
+   {DATA_FIELD_NOTE}
+   工序 OEE：{OEE_INPUT_HINT}
+   液体配方、收率、罐容和换型矩阵不能在主界面改，请用 Excel 模板再导入
+3. 主路径：点「计算本班结果」，立刻算完本班，再看瓶颈、报警与报告。
+   「开始仿真」是可选的墙钟动画，运行中可以改速度，不改变计算口径。
+   离散工序运行中可用「停机切换（换型）」模拟更换型号或规格
+   （如零件装配、功能测试）。液体换型不走这个按钮
+4. 保存方案（主界面或「文件 → 保存方案」）；
+   「方案」菜单用于方案管理 / 对比与 KPI 历史趋势。
+   带「预计」的 KPI 来自配置公式，带「本次」的 KPI 来自仿真窗口
+5. 分析试算：「分析」菜单提供敏感性试算、批量试算、
+   智能优化、人力规划。试算回答加人、节拍、OEE 是否更扛得住，
+   不回答这张单能不能交
+6. 需要存档时用「报告 → 导出报告」（Excel / PDF）
+7. 快捷键：Ctrl+S 保存方案、空格 开始/暂停演示仿真
+
+【边界】
+• 回答产能、瓶颈，以及加人 / 节拍 / OEE 试算
+• 不回答订单、MPS 或交期承诺
 • 完整本地运行，数据不出设备"""
 
     def __init__(self, parent):
@@ -3950,7 +4032,11 @@ class HelpDialog:
 class AnalysisGuideDialog:
     """分析指南（V3.3）：何时用哪个分析功能"""
 
-    GUIDE_TEXT = """【如何选择分析功能】
+    GUIDE_TEXT = f"""{PRODUCT_SCOPE_TEXT}
+
+【如何选择分析功能】
+
+这些功能都是产线预评估试算，不判断订单能否交货。
 
 1. 想看某个参数变化的影响 → 敏感性试算
    操作：分析 → 敏感性试算...；结果可一键应用最优建议。
@@ -3960,7 +4046,7 @@ class AnalysisGuideDialog:
    蓝色曲线为方案，红色虚线为当前基线。
 
 3. 想同时调多个参数找最优组合 → 智能优化
-   操作：分析 → 智能优化...；选目标（产出最大/成本最小），
+   操作：分析 → 智能优化...；选目标（本次产出最大/本次单位成本最小），
    可锁定工序；TOP 方案与基线同表对比。
 
 4. 想预估人力/成本/招聘 → 人力规划
@@ -3977,7 +4063,7 @@ class AnalysisGuideDialog:
    自动仿真当前产线并导出 Excel（10+ Sheet）/ PDF。
 
 【通用建议】
-- 先跑一次仿真，再看报警与失衡分析定位瓶颈；
+- 主路径是「计算本班结果」，再看报警与失衡；墙钟动画可选；
 - 用敏感性/批量试算验证方向，用智能优化做组合寻优；
 - 所有结果均可导出 Excel 或复制文本。"""
 
@@ -4209,7 +4295,7 @@ class WizardDialog:
         self.production_type_var = tk.StringVar(value="assembly")
         type_hints = {
             "assembly": "离散装配，默认单位：件，可在产出单位中修改",
-            "liquid_filling": "液体/批量生产，计量单位：千克",
+            "liquid_filling": "液体/批量生产，计量单位：千克。配方、收率、罐容和换型矩阵只读",
             "pouch_packaging": "高速机台包装，默认单位：件，可修改",
         }
         for key, label in [
@@ -4305,14 +4391,24 @@ class WizardDialog:
         """步骤 4：完成"""
         ttk.Label(
             self.page_finish,
-            text="完成后可在左侧「工序配置」继续编辑工序细节。",
+            text="完成后回到主界面，点「计算本班结果」看瓶颈与报告。"
+                 "「开始仿真」只是可选的墙钟动画。",
             foreground="gray",
+            wraplength=620,
+            justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(0, 5))
-        self.summary_text = tk.Text(self.page_finish, height=12, width=70, state=tk.DISABLED)
-        self.summary_text.pack(fill=tk.BOTH, expand=True, pady=5)
+        summary_frame = ttk.Frame(self.page_finish)
+        summary_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.summary_text = tk.Text(
+            summary_frame, height=12, width=70, wrap=tk.WORD, state=tk.DISABLED,
+        )
+        summary_scroll = ttk.Scrollbar(summary_frame, command=self.summary_text.yview)
+        self.summary_text.configure(yscrollcommand=summary_scroll.set)
+        self.summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        summary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         ttk.Checkbutton(
             self.page_finish,
-            text="配置完成后立即开始仿真",
+            text="可选：完成后播放墙钟动画（演示仿真，不改变计算口径）",
             variable=self.auto_start_var,
         ).pack(anchor=tk.W, pady=5)
 
@@ -4452,8 +4548,11 @@ class WizardDialog:
         )
         if line.stations:
             unit = line.get_unit()
-            summary += f"瓶颈产能：{line.get_bottleneck_capacity():.0f} {unit}/h\n"
+            summary += f"预计瓶颈产能：{line.get_bottleneck_capacity():.0f} {unit}/h\n"
             summary += f"预计日产量：{line.calculate_daily_output():.0f} {unit}\n"
+        liquid_note = format_liquid_readonly_summary(line)
+        if liquid_note:
+            summary += "\n" + liquid_note + "\n"
         self.summary_text.config(state=tk.NORMAL)
         self.summary_text.delete("1.0", tk.END)
         self.summary_text.insert("1.0", summary)

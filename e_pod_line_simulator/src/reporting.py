@@ -88,15 +88,16 @@ def _kpi_rows(result: SimulationResult) -> List[List[str]]:
         ["产线名称", result.line_name],
         ["实际经过时间(分钟)", f"{duration_minutes:.2f}"],
         ["计划仿真时长(分钟)", f"{result.duration_seconds / 60:.2f}"],
-        [f"总产出({unit})", f"{result.total_output}"],
-        [f"可发运产出({unit})", f"{k.get('shippable_quantity', result.total_output)}"],
-        ["隔离批次", f"{k.get('rejected_batches', 0)}"],
-        [f"瓶颈产能({unit}/h)", f"{k.get('bottleneck_capacity', 0):.1f}"],
+        [f"本次总产出({unit})", f"{result.total_output}"],
+        [f"本次可发运产出({unit})", f"{k.get('shippable_quantity', result.total_output)}"],
+        ["本次隔离批次", f"{k.get('rejected_batches', 0)}"],
+        [f"预计瓶颈产能({unit}/h)", f"{k.get('bottleneck_capacity', 0):.1f}"],
         [f"预计日产量({unit})", f"{k.get('daily_output', 0):.0f}"],
         ["预计日人工成本(元)", f"{k.get('total_cost', 0):.2f}"],
         [f"预计单位人工成本(元/{unit})", f"{k.get('unit_cost', 0):.3f}"],
-        ["产线平衡率", f"{k.get('balance_rate', 0) * 100:.1f}%"],
-        [f"UPPH({unit}/人·h)", f"{k.get('upph', 0):.1f}"],
+        ["预计平衡率", f"{k.get('balance_rate', 0) * 100:.1f}%"],
+        [f"预计UPPH({unit}/人·h)", f"{k.get('upph', 0):.1f}"],
+        ["口径", "预计=当前配置公式；本次=本窗口仿真。输入 OEE 不是经典可用×性能×质量。"],
     ]
     rows.extend([
         ["运行ID", str(getattr(result, "run_id", ""))],
@@ -122,7 +123,7 @@ def _kpi_rows(result: SimulationResult) -> List[List[str]]:
     if k.get("yield_rate") is not None:
         rows.append(["收率", f"{k['yield_rate']:.1%}"])
     if k.get("machine_oee") is not None:
-        rows.append(["机台OEE", f"{k['machine_oee']:.1%}"])
+        rows.append(["预计机台OEE（输入折减均值）", f"{k['machine_oee']:.1%}"])
     if k.get("cleaning_time_ratio") is not None:
         rows.append(["清洗时间占比", f"{k['cleaning_time_ratio']:.1%}"])
     if k.get("cost_per_liter") is not None:
@@ -183,7 +184,7 @@ def export_excel(result: SimulationResult, file_path: str) -> bool:
                 'OEE可用率': m.get('oee_availability', 0),
                 'OEE性能率': m.get('oee_performance', 0),
                 'OEE合格率': m.get('oee_quality', 0),
-                'OEE': m.get('oee_total', 0),
+                'OEE分解': m.get('oee_total', 0),
             }
             for sid, m in result.station_metrics.items()
         ])
@@ -394,7 +395,7 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
             Spacer(1, 8 * mm),
             Paragraph(
                 f"实际经过时间：{(result.elapsed_seconds if getattr(result, 'run_id', '') else result.duration_seconds) / 60:.2f} 分钟　"
-                f"总产出：{result.total_output} {result.unit}",
+                f"本次总产出：{result.total_output} {result.unit}",
                 body_style,
             ),
             Spacer(1, 6 * mm),
@@ -444,9 +445,9 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
         story.append(Spacer(1, 3 * mm))
         story.append(_pdf_table(config_rows, [80 * mm, 90 * mm]))
 
-        # 三、工序指标（含 OEE）
+        # 三、工序指标（OEE分解，不是输入 OEE）
         if result.station_metrics:
-            metric_rows = [["工序", "运行s", "等待s", "堵塞s", "利用率", "OEE"]]
+            metric_rows = [["工序", "运行s", "等待s", "堵塞s", "利用率", "OEE分解"]]
             for sid, m in result.station_metrics.items():
                 metric_rows.append([
                     str(m.get("name", sid)),
@@ -457,7 +458,7 @@ def export_pdf(result: SimulationResult, file_path: str) -> bool:
                     f"{m.get('oee_total', 0) * 100:.1f}%",
                 ])
             story.append(Spacer(1, 6 * mm))
-            story.append(Paragraph("三、工序指标（含 OEE）", header_style))
+            story.append(Paragraph("三、工序指标（OEE分解，不是输入 OEE）", header_style))
             story.append(Spacer(1, 3 * mm))
             story.append(_pdf_table(metric_rows, [35 * mm, 25 * mm, 25 * mm, 25 * mm, 30 * mm, 30 * mm]))
 
@@ -615,7 +616,7 @@ def export_hr_report(summary: dict, file_path: str) -> bool:
                 "配置人数": d.get("configured", 0),
                 "单件耗时(秒)": d.get("process_time", 0),
                 "机台节拍(秒)": d.get("machine_takt") or "",
-                "OEE": d.get("oee", 0),
+                "输入OEE（节拍折减）": d.get("oee", 0),
                 "效率": d.get("efficiency", 0),
                 "切换+清洗(分钟)": d.get("changeover_minutes", 0),
                 "协作模式": d.get("collaboration", ""),
