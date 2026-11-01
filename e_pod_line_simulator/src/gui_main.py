@@ -255,13 +255,13 @@ class MainWindow:
         right_frame.rowconfigure(0, weight=1)
         right_frame.rowconfigure(1, weight=0)
         right_frame.columnconfigure(0, weight=1)
-        main_paned.add(right_frame, weight=3)
+        main_paned.add(right_frame, weight=4)
 
-        # 最右侧：报警栏（收窄默认宽度，不随窗口放大而膨胀）
-        alert_frame = ttk.Frame(main_paned, width=290)
-        main_paned.add(alert_frame, weight=0)
-
-        # 默认分隔位置：左 380 / 右 280，中间自适应（V3.1 布局修复）
+        # 分析提醒必须有正权重。weight=0 时，窗口从尚未映射的 1px 撑开后
+        # 这一栏分不到宽度，分隔条会贴在右缘，报警和「清空」都点不到。
+        alert_frame = ttk.Frame(main_paned, width=280)
+        main_paned.add(alert_frame, weight=1)
+        self._pane_layout_attempts = 0
         self.root.after_idle(self._set_default_panes)
         
         # 画布视图（2D可视化）
@@ -458,20 +458,31 @@ class MainWindow:
         self.status_meta.pack(side=tk.RIGHT, padx=(4, 0))
 
     def _set_default_panes(self) -> None:
-        """设置三栏默认宽度（左 380 / 报警 290 / 中间自适应）"""
-        if not hasattr(self, 'main_paned'):
+        """窗口有真实宽度后再放分隔条，让右侧分析提醒默认可拖。"""
+        if not hasattr(self, "main_paned"):
             return
         try:
+            if not self.root.winfo_exists():
+                return
             self.main_paned.update_idletasks()
             total = self.main_paned.winfo_width()
-            if total <= 100:
-                total = self.root.winfo_width()
-            sash0 = min(340, max(300, int(total * 0.23)))
-            sash1 = max(sash0 + 400, total - 250)
-            self.main_paned.sashpos(0, sash0)
-            self.main_paned.sashpos(1, sash1)
-        except Exception:
-            pass
+            # 首次 after_idle 时窗口往往还没映射，宽度仍是 1。
+            # 这时写入的 sashpos 会被夹到边缘，之后再放大也不会把提醒栏拉回来。
+            if total <= 100 or not self.root.winfo_ismapped():
+                self._pane_layout_attempts = getattr(self, "_pane_layout_attempts", 0) + 1
+                if self._pane_layout_attempts <= 40:
+                    self.root.after(50, self._set_default_panes)
+                return
+            self._pane_layout_attempts = 0
+            alert = min(300, max(260, int(total * 0.18)))
+            left = min(360, max(280, int(total * 0.22)))
+            if left + alert + 360 > total:
+                alert = max(220, total // 5)
+                left = max(220, min(left, total - alert - 360))
+            self.main_paned.sashpos(0, left)
+            self.main_paned.sashpos(1, max(left + 200, total - alert))
+        except tk.TclError:
+            return
     
     def _create_default_line(self) -> None:
         """

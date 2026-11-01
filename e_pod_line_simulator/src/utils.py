@@ -298,6 +298,20 @@ def save_ui_config(config: Dict[str, Any]) -> bool:
         return False
 
 
+# 校验和导入错误要给用户看中文名称，不能把字段属性名原样拼进提示。
+STATION_FIELD_LABELS = {
+    "oee": "OEE",
+    "efficiency": "人员效率",
+    "sampling_rate": "抽检比例",
+    "defect_rate": "缺陷率",
+    "changeover_time": "换型时间",
+    "clean_time_minutes": "清洗时间",
+    "rework_minutes": "返工时间",
+    "buffer_capacity": "缓冲区容量",
+    "machine_count": "机台数量",
+}
+
+
 def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optional[str]]:
     """Import an Excel configuration transactionally; reject explicit invalid values."""
     try:
@@ -456,7 +470,8 @@ def import_from_excel(file_path: str) -> Tuple[Optional[ProductionLine], Optiona
                     ('clean_time_minutes', 0, False), ('sampling_rate', 0, False),
                     ('defect_rate', 0, False), ('rework_minutes', 0, False),
                 ):
-                    kwargs[key] = number(field(key), default, key, integer)
+                    kwargs[key] = number(
+                        field(key), default, STATION_FIELD_LABELS[key], integer)
                 if 'machine_count' in actual_columns:
                     kwargs['machine_count'] = number(field('machine_count'), 1, '机台数', True)
                 elif takt is not None:
@@ -656,12 +671,23 @@ def validate_production_line(
             if not valid:
                 return False, f"工序'{station.name}'参数错误：{error}"
             for key in ('oee', 'efficiency', 'sampling_rate', 'defect_rate'):
-                bounded(getattr(station, key), f"工序{station.name}的{key}", high=1)
+                bounded(
+                    getattr(station, key),
+                    f"工序{station.name}的{STATION_FIELD_LABELS[key]}",
+                    high=1,
+                )
             for key in ('changeover_time', 'clean_time_minutes', 'rework_minutes'):
-                bounded(getattr(station, key), f"工序{station.name}的{key}")
+                bounded(
+                    getattr(station, key),
+                    f"工序{station.name}的{STATION_FIELD_LABELS[key]}",
+                )
             for key in ('buffer_capacity', 'machine_count'):
-                bounded(getattr(station, key, 1), f"工序{station.name}的{key}",
-                        integer=True, positive=True)
+                bounded(
+                    getattr(station, key, 1),
+                    f"工序{station.name}的{STATION_FIELD_LABELS[key]}",
+                    integer=True,
+                    positive=True,
+                )
             if station.machine_takt is not None:
                 bounded(station.machine_takt, f"工序{station.name}的机台节拍", positive=True)
             if not isinstance(station.job_role, JobRole):

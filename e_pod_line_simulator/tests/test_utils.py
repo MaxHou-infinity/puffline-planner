@@ -270,6 +270,38 @@ def test_full_model_rejects_invalid_station_fields(attribute, value):
     assert validate_production_line(line)[0] is False
 
 
+@pytest.mark.parametrize("attribute,value,label", [
+    ("efficiency", 1.4, "人员效率"),
+    ("oee", 2, "OEE"),
+    ("sampling_rate", 1.1, "抽检比例"),
+    ("defect_rate", -0.1, "缺陷率"),
+    ("changeover_time", -1, "换型时间"),
+    ("clean_time_minutes", -1, "清洗时间"),
+    ("rework_minutes", -1, "返工时间"),
+    ("buffer_capacity", 1.5, "缓冲区容量"),
+    ("machine_count", 1.5, "机台数量"),
+])
+def test_station_limit_errors_use_chinese_labels(attribute, value, label):
+    line = ProductionLine("invalid")
+    station = Station("s", "装配", 1, 1)
+    setattr(station, attribute, value)
+    line.stations.append(station)
+    ok, message = validate_production_line(line)
+    assert ok is False
+    assert label in message
+    assert attribute not in message
+
+
+def test_excel_invalid_efficiency_mentions_chinese_label(tmp_path):
+    values = {'工序名': ['工序'], '耗时(秒)': [1], '人数': [1], '人员效率': ['nan']}
+    path = tmp_path / 'bad-efficiency.xlsx'
+    pd.DataFrame(values).to_excel(path, index=False)
+    line, error = import_from_excel(str(path))
+    assert line is None
+    assert error and "人员效率" in error
+    assert "efficiency" not in error
+
+
 def test_atomic_json_failure_preserves_original(tmp_path):
     from src.utils import atomic_write_json
     target = tmp_path / 'safe.json'

@@ -6,7 +6,7 @@ pytestmark = pytest.mark.skipif(
     os.environ.get('PUFFLINE_GUI_TESTS') != '1', reason='需要显式启用真实桌面验收')
 
 
-def test_modern_controls_and_small_window_workflows(monkeypatch):
+def test_modern_controls_and_small_window_workflows(monkeypatch, tmp_path):
     from tkinter import ttk
     from src import gui_main
     from src.gui_panels import StationDialog, WizardDialog, build_template_line
@@ -84,7 +84,128 @@ def test_modern_controls_and_small_window_workflows(monkeypatch):
         # 数据仍可送入真实仿真引擎，非HTML演示值。
         result = SimulationEngine(app.production_line).run_sync(1)
         assert result.total_output > 0
+        _check_alert_column(app)
+        _check_scenario_and_form_details(app, monkeypatch, tmp_path)
         app.root.update()
         assert not errors
     finally:
         app.root.destroy()
+
+
+def _wait_until(root, predicate, timeout=2.0):
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        root.update()
+        if predicate():
+            return True
+        time.sleep(0.05)
+    root.update()
+    return predicate()
+
+
+def _check_alert_column(app):
+    """默认 1500 与 1880 宽时，分析提醒占一列，分隔条离开右缘且可拖。"""
+    alert_pane = str(app.alert_panel.master)
+    assert app.main_paned.pane(alert_pane)['weight'] >= 1
+    for width, height in ((1500, 900), (1880, 980)):
+        app.root.geometry(f'{width}x{height}+20+20')
+        ready = _wait_until(
+            app.root,
+            lambda: app.main_paned.winfo_width() > 400
+            and app.alert_panel.winfo_width() >= 220,
+        )
+        assert ready, app.alert_panel.winfo_width()
+        paned_width = app.main_paned.winfo_width()
+        sash = app.main_paned.sashpos(1)
+        assert sash < paned_width - 180
+        before = app.alert_panel.winfo_width()
+        app.main_paned.sashpos(1, sash - 80)
+        app.root.update()
+        assert app.alert_panel.winfo_width() >= before + 40
+        assert app.btn_start.winfo_width() > 20
+
+
+def _check_scenario_and_form_details(app, monkeypatch, tmp_path):
+    """方案管理按钮留在窗口内；对比失败不留空白窗；说明和表单可滚动。"""
+    import tkinter as tk
+    from tkinter import ttk
+    from src.gui_panels import (
+        HelpSection,
+        ScenarioCompareDialog,
+        ScenarioManageDialog,
+        scrollable_form,
+    )
+    from src.models import ProductionLine, ProductionType, Station
+    from src.scenario_manager import ScenarioManager
+
+    shown = []
+    monkeypatch.setattr(
+        'src.gui_panels.messagebox.showerror',
+        lambda *args, **kwargs: shown.append((args, kwargs)),
+    )
+    manager = ScenarioManager()
+    manager.set_storage_path(str(tmp_path / 'scenarios.json'))
+
+    def make_line(name):
+        line = ProductionLine(name)
+        line.add_station(Station('s01', '零件装配', 25, 2))
+        return line
+
+    ok, err = manager.save_scenario('方案A', make_line('甲'))
+    assert ok, err
+    other = make_line('乙')
+    other.production_type = ProductionType.POUCH_PACKAGING
+    ok, err = manager.save_scenario('方案B', other)
+    assert ok, err
+
+    manage = ScenarioManageDialog(app.root, manager)
+    manage.dialog.geometry('780x480+80+80')
+    manage.dialog.update()
+    buttons = {}
+
+    def walk(widget):
+        if isinstance(widget, ttk.Button):
+            buttons[widget.cget('text')] = widget
+        for child in widget.winfo_children():
+            walk(child)
+
+    walk(manage.dialog)
+    limit = manage.dialog.winfo_rooty() + manage.dialog.winfo_height()
+    for text in ('导入方案', '删除选中', '方案对比', '关闭'):
+        button = buttons[text]
+        assert button.winfo_ismapped()
+        assert button.winfo_rooty() + button.winfo_height() <= limit + 1
+    manage.dialog.destroy()
+
+    before = {str(child) for child in app.root.winfo_children()}
+    compare = ScenarioCompareDialog(app.root, manager, ['方案A', '方案B'])
+    app.root.update()
+    assert compare.dialog is None
+    assert shown and '对比方案失败' in shown[-1][0][1]
+    after = {str(child) for child in app.root.winfo_children() if child.winfo_exists()}
+    assert after == before
+
+    help_host = tk.Toplevel(app.root)
+    help_host.geometry('420x160+40+40')
+    section = HelpSection(help_host, '使用说明', '说明正文\n' * 12)
+    section.pack(fill=tk.X)
+    section._toggle()
+    help_host.update()
+    assert section.body.cget('yscrollcommand')
+    assert section.body_scroll.winfo_ismapped()
+    help_host.destroy()
+
+    form_host = tk.Toplevel(app.root)
+    form_host.geometry('360x180+60+60')
+    content = scrollable_form(form_host)
+    for index in range(24):
+        ttk.Label(content, text=f'字段{index}').pack(anchor=tk.W)
+    form_host.update()
+    canvas = content.master
+    target = content.winfo_children()[-1]
+    for _ in range(6):
+        target.event_generate('<Button-5>')
+    form_host.update()
+    assert canvas.yview()[0] > 0
+    form_host.destroy()

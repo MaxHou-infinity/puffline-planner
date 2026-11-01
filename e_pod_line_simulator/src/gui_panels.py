@@ -103,6 +103,14 @@ def format_effective_takt(station) -> str:
     return f"{float(station.process_time):.1f}"
 
 
+def capacity_heading(unit: str) -> str:
+    """窄工序列表用短表头，避免「产能」被列宽裁掉。"""
+    text = str(unit or "颗").strip() or "颗"
+    if len(text) <= 2:
+        return f"产能/{text}"
+    return "产能"
+
+
 def history_actual_cost_text(kpis) -> str:
     """历史表「本次」列只读 actual_unit_cost；未仿真的快照没有该字段。"""
     if not isinstance(kpis, dict) or "actual_unit_cost" not in kpis:
@@ -189,7 +197,7 @@ def scrollable_form(parent, padding=15):
     window = canvas.create_window((0, 0), window=content, anchor="nw")
     content.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
     canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
-    # Focus follows keyboard navigation even when the next field is below the viewport.
+    # 键盘走到视口外的字段时，把它滚进可见区域。
     def reveal(event):
         widget = event.widget
         if not str(widget).startswith(str(content)):
@@ -201,15 +209,47 @@ def scrollable_form(parent, padding=15):
         if top < visible_top or bottom > visible_top + canvas.winfo_height():
             height = max(1, content.winfo_reqheight())
             canvas.yview_moveto(max(0, top - 20) / height)
+
     def wheel(event):
+        # 指针停在输入框上时，事件发生在子控件，不会冒泡到对话框本身。
+        # Linux 滚轮是 Button-4/5，没有 MouseWheel 的 delta。
         if not str(event.widget).startswith(str(container)):
             return
-        if content.winfo_reqheight() > canvas.winfo_height():
-            amount = max(1, abs(int(event.delta)) // 120)
-            canvas.yview_scroll(-amount if event.delta > 0 else amount, 'units')
-            return 'break'
-    parent.bind('<MouseWheel>', wheel, add='+')
+        try:
+            if content.winfo_reqheight() <= canvas.winfo_height():
+                return
+        except tk.TclError:
+            return
+        number = getattr(event, "num", None)
+        delta = getattr(event, "delta", 0) or 0
+        if number == 4 or delta > 0:
+            steps = -1
+        elif number == 5 or delta < 0:
+            steps = 1
+        else:
+            return
+        canvas.yview_scroll(steps, "units")
+        return "break"
+
+    bound = set()
+
+    def bind_wheel(widget):
+        path = str(widget)
+        if path not in bound:
+            bound.add(path)
+            widget.bind("<MouseWheel>", wheel, add="+")
+            widget.bind("<Button-4>", wheel, add="+")
+            widget.bind("<Button-5>", wheel, add="+")
+        for child in widget.winfo_children():
+            bind_wheel(child)
+
+    def bind_later(_event=None):
+        bind_wheel(container)
+
     parent.bind("<FocusIn>", reveal, add="+")
+    # 字段是函数返回后才 grid 上去的，内容区尺寸变化时再补绑滚轮。
+    content.bind("<Configure>", bind_later, add="+")
+    container.after_idle(bind_later)
     return content
 
 
@@ -392,24 +432,25 @@ class ConfigPanel(ttk.Frame):
         self.tree.heading('name', text='工序名称')
         self.tree.heading('time', text='节拍(秒)')
         self.tree.heading('workers', text='人数')
-        self.tree.heading('capacity', text='产能(颗/h)')
+        self.tree.heading('capacity', text=capacity_heading('颗'))
         
-        # 设置列宽
-        self.tree.column('name', width=100)
-        self.tree.column('time', width=110)
-        self.tree.column('workers', width=60)
-        self.tree.column('capacity', width=100)
+        # 名称列吃剩余宽度；节拍和产能固定，避免窄栏把「产能」裁掉。
+        self.tree.column('name', width=100, minwidth=64, stretch=True)
+        self.tree.column('time', width=88, minwidth=80, stretch=False)
+        self.tree.column('workers', width=48, minwidth=42, stretch=False)
+        self.tree.column('capacity', width=84, minwidth=76, stretch=False)
         
         # 绑定选择事件
         self.tree.bind('<<TreeviewSelect>>', self._on_select)
         
-        # 添加滚动条
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        
-        # 布局
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar_x = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=scrollbar_x.set)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        scrollbar_x.grid(row=1, column=0, sticky="ew")
     
     def update_stations(self, stations: List[Station], production_line: Optional[Any] = None) -> None:
         """
@@ -505,7 +546,7 @@ class ConfigPanel(ttk.Frame):
     def set_unit(self, unit: str) -> None:
         """按生产类型更新工序列表产能单位"""
         if hasattr(self, 'tree'):
-            self.tree.heading('capacity', text=f'产能({unit}/h)')
+            self.tree.heading('capacity', text=capacity_heading(unit))
     
     def _on_select(self, event: tk.Event) -> None:
         """工序选择事件"""
@@ -995,7 +1036,9 @@ class StationDialog:
         # 创建对话框窗口
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
-        self.dialog.geometry(f"660x{min(780, parent.winfo_screenheight() - 100)}")
+        screen_h = parent.winfo_screenheight()
+        # 默认高一些，让「人员效率 / 缓冲区容量」不用先滚动就能看到。
+        self.dialog.geometry(f"660x{min(920, max(720, screen_h - 140))}")
         self.dialog.transient(parent)  # 设置为父窗口的子窗口
         self.dialog.grab_set()  # 模态对话框
         
@@ -1587,25 +1630,21 @@ class ScenarioCompareDialog:
         """
         self.scenario_manager = scenario_manager
         self.scenario_names = scenario_names
-        
-        # 创建对话框窗口
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("方案对比")
-        self.dialog.geometry("900x600")
-        self.dialog.resizable(True, True)
-        
-        # 设置对话框为模态
-        self.dialog.transient(parent)
-        self.dialog.grab_set()
-        
-        # 获取对比数据
+        self.dialog = None
+        self.export_rows: List[List[str]] = []
+        # 先算对比。失败时不创建窗口，避免错误提示关掉后留下空白「方案对比」。
         try:
             self.comparison_data = scenario_manager.compare_scenarios(scenario_names)
-        except Exception as e:
-            messagebox.showerror("错误", f"对比方案失败：{str(e)}")
-            self.dialog.destroy()
+        except Exception as exc:
+            messagebox.showerror("错误", f"对比方案失败：{exc}", parent=parent)
             return
-        self.export_rows: List[List[str]] = []
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("方案对比")
+        self.dialog.geometry("900x680")
+        self.dialog.resizable(True, True)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
 
         first = self.scenario_manager.get_scenario(scenario_names[0])
         self.unit = first.production_line.get_unit() if first else "颗"
@@ -1655,9 +1694,8 @@ class ScenarioCompareDialog:
         )
         title_label.pack(pady=10)
         
-        # 创建表格框架
+        # 表格最后再 pack，好把按钮和说明固定在窗口底部。
         table_frame = ttk.Frame(main_frame)
-        table_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
         # 创建Treeview表格
         # 列：指标 + 每个方案 + 差异列（每个方案相对于第一个方案的差异）
@@ -1698,28 +1736,25 @@ class ScenarioCompareDialog:
         # 填充数据
         self._populate_table()
         
-        # 推荐方案标签
-        if self.comparison_data.get('recommendation'):
-            recommendation_label = ttk.Label(
-                main_frame,
-                text=f"💡 推荐方案：{self.comparison_data['recommendation']}",
-                font=(resolve_font_family(), 10, 'bold'),
-                foreground=COLORS['success']
-            )
-            recommendation_label.pack(pady=10)
-        
-        # 关闭按钮
         button_frame = ttk.Frame(main_frame)
-        button_frame.pack(pady=10)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
         ttk.Button(button_frame, text="导出Excel", command=self._export_excel).pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(button_frame, text="关闭", command=self.dialog.destroy).pack()
+        ttk.Button(button_frame, text="关闭", command=self.dialog.destroy).pack(side=tk.RIGHT)
         HelpSection(
             main_frame,
             "使用说明",
             SCENARIO_COMPARE_HELP,
-        ).pack(fill=tk.X, pady=(0, 8))
+        ).pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 4))
+        if self.comparison_data.get('recommendation'):
+            ttk.Label(
+                main_frame,
+                text=f"💡 推荐方案：{self.comparison_data['recommendation']}",
+                font=(resolve_font_family(), 10, 'bold'),
+                foreground=COLORS['success']
+            ).pack(side=tk.BOTTOM, pady=(0, 6))
+        table_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 8))
     
     def _populate_table(self) -> None:
         """填充对比表格数据"""
@@ -1826,7 +1861,8 @@ class ScenarioManageDialog:
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("方案管理 / 对比")
-        self.dialog.geometry("780x480")
+        self.dialog.geometry("780x640")
+        self.dialog.minsize(720, 480)
         self.dialog.transient(parent)
         self.dialog.grab_set()
         self._img_unchecked = self._make_check_image(False)
@@ -1886,7 +1922,6 @@ class ScenarioManageDialog:
         self.tree.column('created_at', width=140)
         self.tree.column('description', width=260)
         self.tree.column('unit_cost', width=110)
-        self.tree.pack(fill=tk.BOTH, expand=True)
         self.selected_index: Optional[int] = None
         self.tree.bind(
             "<<TreeviewSelect>>",
@@ -1899,8 +1934,9 @@ class ScenarioManageDialog:
             ),
         )
 
+        # 按钮栏先占住底部，列表再填充剩余高度，避免 480 高时把按钮裁出窗口。
         button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
         ttk.Button(button_frame, text="导入方案", command=self._import_selected).pack(side=tk.LEFT)
         ttk.Button(button_frame, text="删除选中", command=self._delete_selected).pack(side=tk.LEFT)
         ttk.Button(button_frame, text="方案对比", command=self._toggle_compare).pack(side=tk.LEFT)
@@ -1914,7 +1950,8 @@ class ScenarioManageDialog:
             main_frame,
             textvariable=self.compare_hint_var,
             foreground=COLORS["text_secondary"],
-        ).pack(anchor=tk.W, pady=(6, 0))
+        ).pack(side=tk.BOTTOM, anchor=tk.W, fill=tk.X, pady=(6, 0))
+        self.tree.pack(fill=tk.BOTH, expand=True)
 
         self._refresh()
 
@@ -3638,16 +3675,28 @@ class HelpSection:
             self.frame, text=f"▶ {title}", command=self._toggle
         )
         self.btn.pack(anchor=tk.W)
-        height = max(3, min(10, text.count("\n") + 2))
+        # 说明区限高并可滚动，展开后不再被对话框底边裁掉。
+        line_count = text.count("\n") + 1
+        height = max(4, min(8, line_count))
+        self.body_wrap = ttk.Frame(self.frame)
         self.body = tk.Text(
-            self.frame, height=height, wrap=tk.WORD,
+            self.body_wrap, height=height, wrap=tk.WORD,
             font=(resolve_font_family(), 10),
             foreground=COLORS["text_secondary"],
             state=tk.DISABLED,
         )
+        self.body_scroll = ttk.Scrollbar(
+            self.body_wrap, orient=tk.VERTICAL, command=self.body.yview)
+        self.body.configure(yscrollcommand=self.body_scroll.set)
+        self.body.grid(row=0, column=0, sticky="nsew")
+        self.body_scroll.grid(row=0, column=1, sticky="ns")
+        self.body_wrap.columnconfigure(0, weight=1)
+        self.body_wrap.rowconfigure(0, weight=1)
         self.body.configure(state=tk.NORMAL)
         self.body.insert("1.0", text)
         self.body.configure(state=tk.DISABLED)
+        if line_count <= height:
+            self.body_scroll.grid_remove()
 
     def pack(self, *args, **kwargs):
         self.frame.pack(*args, **kwargs)
@@ -3661,9 +3710,28 @@ class HelpSection:
         self._expanded = not self._expanded
         self.btn.config(text=("▼ " if self._expanded else "▶ ") + self._title)
         if self._expanded:
-            self.body.pack(fill=tk.X, expand=False, padx=(16, 0), pady=(2, 6))
+            self.body_wrap.pack(fill=tk.X, expand=False, padx=(16, 0), pady=(2, 6))
+            self._grow_to_fit()
         else:
-            self.body.pack_forget()
+            self.body_wrap.pack_forget()
+
+    def _grow_to_fit(self) -> None:
+        """说明展开后如果超出窗口，就把对话框增高到屏幕范围内。"""
+        top = self.frame.winfo_toplevel()
+        try:
+            top.update_idletasks()
+            bottom = self.body_wrap.winfo_rooty() + self.body_wrap.winfo_reqheight()
+            visible_bottom = top.winfo_rooty() + top.winfo_height()
+            overflow = bottom - visible_bottom + 16
+            if overflow <= 0:
+                return
+            screen_bottom = top.winfo_screenheight() - 40
+            room = screen_bottom - top.winfo_rooty()
+            new_height = min(top.winfo_height() + overflow, max(top.winfo_height(), room))
+            if new_height > top.winfo_height():
+                top.geometry(f"{top.winfo_width()}x{int(new_height)}")
+        except tk.TclError:
+            return
 
 
 def build_result_rows(columns, rows, highlight_key=None, highlight_value=None):

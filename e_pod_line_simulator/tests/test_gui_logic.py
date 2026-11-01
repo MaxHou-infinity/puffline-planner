@@ -343,7 +343,10 @@ def test_station_editor_validation_covers_buffer_and_efficiency():
     assert validate_station_in_line(line, station, "s01")[0] is False
     station.buffer_capacity = 8
     station.efficiency = 1.4
-    assert validate_station_in_line(line, station, "s01")[0] is False
+    ok, message = validate_station_in_line(line, station, "s01")
+    assert ok is False
+    assert "人员效率" in message
+    assert "efficiency" not in message
 
 
 def test_about_dialog_class_and_urls():
