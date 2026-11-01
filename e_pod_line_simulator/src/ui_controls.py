@@ -9,8 +9,8 @@ def install_control_elements(root, style, colors: dict) -> None:
     def surface(fill, border):
         image = Image.new('RGBA', (80, 80), colors['surface'])
         draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((1, 1, 78, 78), radius=17, fill=fill, outline=border, width=2)
-        image = image.resize((28, 28), Image.Resampling.LANCZOS)
+        draw.rounded_rectangle((1, 1, 78, 78), radius=16, fill=fill, outline=border, width=2)
+        image = image.resize((24, 24), Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image, master=root)
         images.append(photo)
         return photo
@@ -36,11 +36,11 @@ def install_control_elements(root, style, colors: dict) -> None:
         style.element_create(element, 'image', normal,
                              ('disabled', disabled), ('pressed', active), ('active', active),
                              ('focus', focused),
-                             border=7, sticky='nsew')
+                             border=5, sticky='nsew')
         style.layout(name, [(element, {'sticky': 'nsew', 'children': [
             ('Button.padding', {'sticky': 'nsew', 'children': [
                 ('Button.label', {'sticky': 'nsew'})]})]})])
-        style.configure(name, foreground=foreground, padding=(12, 7), borderwidth=0)
+        style.configure(name, foreground=foreground, padding=(8, 3), borderwidth=0)
         style.map(name, foreground=[
             ('disabled', colors['text_secondary']), ('!disabled', foreground)])
 
@@ -48,7 +48,7 @@ def install_control_elements(root, style, colors: dict) -> None:
     focus = surface(colors['surface'], colors['primary'])
     disabled = surface(colors['bg'], colors['border'])
     style.element_create('Puff.Entry.border', 'image', normal,
-                         ('disabled', disabled), ('focus', focus), border=7, sticky='nsew')
+                         ('disabled', disabled), ('focus', focus), border=5, sticky='nsew')
     style.layout('TEntry', [('Puff.Entry.border', {'sticky': 'nsew', 'children': [
         ('Entry.padding', {'sticky': 'nsew', 'children': [
             ('Entry.textarea', {'sticky': 'nsew'})]})]})])

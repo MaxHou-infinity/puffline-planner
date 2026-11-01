@@ -15,7 +15,7 @@ PuffLine Planner 是面向 IE 的产线预评估工具，不是 PMC 排产或 MR
 
 前往 [GitHub Releases](https://github.com/MaxHou-infinity/puffline-planner/releases)，下载与操作系统对应的压缩包：
 
-- 当前版本 v3.5.0：下载 `PuffLine-Planner-macOS-v3.5.0.zip` 或 `PuffLine-Planner-Windows-v3.5.0.zip`，解压后运行 `PuffLine Planner.app` 或 `PuffLine-Planner.exe`。v3.3.3 起沿用这一命名规则。
+- 当前版本 v3.5.1：下载 `PuffLine-Planner-macOS-v3.5.1.zip` 或 `PuffLine-Planner-Windows-v3.5.1.zip`，解压后运行 `PuffLine Planner.app` 或 `PuffLine-Planner.exe`。v3.3.3 起沿用这一命名规则。
 - 历史 v3.3.2：附件仍使用 `E-Pod-Line-Simulator-macOS-v3.3.2.zip` 或 `E-Pod-Line-Simulator-Windows-v3.3.2.zip`，解压后运行历史名称的 App 或 EXE。
 
 已打包应用无需另行安装 Python 依赖。请以 Release 页面实际列出的附件为准。

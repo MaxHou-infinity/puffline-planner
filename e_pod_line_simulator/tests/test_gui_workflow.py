@@ -90,6 +90,41 @@ def test_exit_after_cancelled_save_keeps_window(window, monkeypatch):
     assert 'destroyed' not in window.root.values
 
 
+def test_window_title_keeps_product_and_version(window):
+    from src.version import PRODUCT_NAME, __version__
+    window._update_title()
+    assert window.root.text == f"{PRODUCT_NAME} v{__version__}"
+    window._dirty = True
+    window._update_title()
+    assert window.root.text == f"* {PRODUCT_NAME} v{__version__}"
+
+
+def test_layout_helpers_fit_laptop_and_short_wizard():
+    """1280 宽工序栏能放下四列表头；矮屏幕上向导仍整窗留在屏幕内。"""
+    from src.gui_main import default_pane_widths, project_heading
+    from src.gui_panels import place_dialog_on_screen, station_column_spec
+    import tkinter as tk
+    from src.version import PRODUCT_NAME
+
+    assert project_heading(None) == ""
+    assert project_heading("  新产线  ") == "新产线"
+    assert PRODUCT_NAME not in project_heading("")
+    spec = station_column_spec()
+    assert {item["anchor"] for item in spec.values()} == {tk.W}
+    minimum = spec["name"]["minwidth"] + sum(
+        item["width"] for key, item in spec.items() if key != "name"
+    )
+    for total in (1232, 1280, 1400, 1440):
+        left, alert = default_pane_widths(total)
+        assert left - 36 >= minimum
+        assert alert >= 220
+    width, height, x, y = place_dialog_on_screen(1280, 720, 680, 1600)
+    assert x >= 0 and y >= 0
+    assert x + width <= 1280
+    assert y + height <= 720
+    assert height < 1600
+
+
 def test_wizard_creates_unsaved_working_copy(window, monkeypatch):
     line = build_template_line('standard')
     window.logger = NS(info=lambda *args: None)

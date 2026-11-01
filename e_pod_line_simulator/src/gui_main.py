@@ -74,6 +74,29 @@ from src.theme import COLORS, ToolTip, apply_theme, show_toast
 from src.version import PRODUCT_NAME, __version__
 
 
+def project_heading(line_name: Optional[str]) -> str:
+    """主界面大标题只放当前产线名。
+
+    产品名和版本留在操作系统窗口标题里，避免页内再写一遍
+    「PuffLine Planner」。
+    """
+    return (line_name or "").strip()
+
+
+def default_pane_widths(total: int) -> tuple:
+    """按窗口宽度给出左侧工序栏和右侧提醒栏的目标宽度。
+
+    1280 左右的笔记本上，左侧要能放下工序名称、节拍、人数、产能四列表头。
+    """
+    alert = min(300, max(260, int(total * 0.18)))
+    left = min(400, max(340, int(total * 0.26)))
+    # 中间画布至少留一段，避免提醒栏或工序栏把主工作区挤没。
+    if left + alert + 360 > total:
+        alert = max(220, total // 5)
+        left = max(220, min(left, total - alert - 360))
+    return left, alert
+
+
 class MainWindow:
     """
     主窗口类 - 应用程序的主界面
@@ -227,19 +250,19 @@ class MainWindow:
         self.root.rowconfigure(1, weight=1)
         self.root.rowconfigure(2, weight=0)
         self.root.columnconfigure(0, weight=1)
-        header = ttk.Frame(self.root, padding=(20, 16))
+        header = ttk.Frame(self.root, padding=(12, 8))
         header.grid(row=0, column=0, sticky='ew')
-        self.project_title = ttk.Label(header, text="PuffLine Planner", style="Heading.TLabel")
-        self.project_title.pack(anchor=tk.W)
+        # 先不 pack：空窗口不再重复产品名，打开产线后再显示产线名。
+        self.project_title = ttk.Label(header, text="", style="Heading.TLabel")
         self.project_subtitle = ttk.Label(
             header, text="本地产线仿真与人力规划", foreground=COLORS['text_secondary'])
-        self.project_subtitle.pack(anchor=tk.W, pady=(5, 0))
+        self.project_subtitle.pack(anchor=tk.W)
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_paned.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
         self.main_paned = main_paned
         
         # 左侧：配置面板（加宽以完整显示工序列表）
-        left_frame = ttk.Frame(main_paned, width=380)
+        left_frame = ttk.Frame(main_paned, width=360)
         main_paned.add(left_frame, weight=1)
         
         self.config_panel = ConfigPanel(
@@ -488,11 +511,7 @@ class MainWindow:
                     self.root.after(50, self._set_default_panes)
                 return
             self._pane_layout_attempts = 0
-            alert = min(300, max(260, int(total * 0.18)))
-            left = min(360, max(280, int(total * 0.22)))
-            if left + alert + 360 > total:
-                alert = max(220, total // 5)
-                left = max(220, min(left, total - alert - 360))
+            left, alert = default_pane_widths(total)
             self.main_paned.sashpos(0, left)
             self.main_paned.sashpos(1, max(left + 200, total - alert))
         except tk.TclError:
@@ -592,12 +611,29 @@ class MainWindow:
             fill=tk.X, padx=5, pady=(5, 0), before=self.canvas_viewport
         )
 
+    def _sync_project_heading(self) -> None:
+        """页内标题显示产线名；没有产线时不占一行产品名。"""
+        if not hasattr(self, "project_title"):
+            return
+        line = self.production_line
+        text = project_heading(None if line is None else line.name)
+        if not text:
+            if self.project_title.winfo_manager():
+                self.project_title.pack_forget()
+            return
+        self.project_title.config(text=text)
+        if not self.project_title.winfo_manager():
+            self.project_title.pack(anchor=tk.W, before=self.project_subtitle)
+
     def _update_status_meta(self) -> None:
         """状态栏右侧：当前生产类型与计量单位"""
+        self._sync_project_heading()
         if not hasattr(self, 'status_meta'):
             return
         if self.production_line is None:
             self.status_meta.config(text="")
+            if hasattr(self, "project_subtitle"):
+                self.project_subtitle.config(text="本地产线仿真与人力规划")
             return
         type_map = {
             ProductionType.ASSEMBLY: "通用离散装配",
@@ -606,7 +642,6 @@ class MainWindow:
         }
         ptype = type_map.get(self.production_line.production_type, "通用离散装配")
         if hasattr(self, 'project_title'):
-            self.project_title.config(text=self.production_line.name)
             readonly = ""
             if self.production_line.production_type == ProductionType.LIQUID_FILLING:
                 readonly = "　/　配方、罐容、换型矩阵只读"

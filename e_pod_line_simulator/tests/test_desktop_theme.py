@@ -18,9 +18,31 @@ def test_modern_controls_and_small_window_workflows(monkeypatch, tmp_path):
     app = gui_main.MainWindow()
     errors = []
     app.root.report_callback_exception = lambda *args: errors.append(str(args[1]))
+    assert app.project_title.cget("text") == ""
+    assert not app.project_title.winfo_ismapped()
+    assert app.root.title().endswith(f"v{gui_main.__version__}")
     try:
         app.production_line = build_template_line('standard')
         app._update_display()
+        assert app.project_title.cget("text") == "新产线"
+        app.root.geometry('1280x800+20+20')
+        app.root.update()
+        total = app.main_paned.winfo_width()
+        left, alert = gui_main.default_pane_widths(total)
+        app.main_paned.sashpos(0, left)
+        app.main_paned.sashpos(1, max(left + 200, total - alert))
+        app.root.update()
+        assert app.config_panel.tree.xview()[1] > 0.98
+        tree = app.config_panel.tree
+        assert tree.column('#0')['width'] == 0
+        assert tree.column('#0')['stretch'] == 0
+        for column in ('name', 'time', 'workers', 'capacity'):
+            assert tree.heading(column)['anchor'] == 'w'
+            assert tree.column(column)['anchor'] == 'w'
+        tree.heading('capacity', text='产能/件')
+        app.config_panel.set_unit('件')
+        assert tree.heading('capacity')['text'] == '产能/件'
+        assert tree.heading('capacity')['anchor'] == 'w'
         app.root.geometry('1000x620')
         app.root.update()
         assert app.alert_panel.text_widget.cget('background') == COLORS['surface']
@@ -68,6 +90,25 @@ def test_modern_controls_and_small_window_workflows(monkeypatch, tmp_path):
                 super()._create_widgets()
                 def inspect_pages():
                     try:
+                        self.dialog.update()
+                        filler = ttk.Frame(self.step_container, height=1800)
+                        filler.pack(fill="x")
+                        self.dialog.update()
+                        self._body_canvas.yview_moveto(1)
+                        assert self._body_canvas.yview()[0] > 0.5
+                        self._pin_scroll_top()
+                        assert self._body_canvas.yview()[0] < 0.02
+                        filler.destroy()
+                        self.dialog.update()
+                        assert self.btn_cancel.winfo_height() >= 24
+                        assert self.btn_cancel.winfo_height() + 2 >= (
+                            self.btn_cancel.winfo_reqheight()
+                        )
+                        radio = self._template_radios["simple"]
+                        assert radio.winfo_rooty() >= self._body_canvas.winfo_rooty() - 2
+                        assert radio.winfo_rooty() < (
+                            self._body_canvas.winfo_rooty() + self._body_canvas.winfo_height()
+                        )
                         self._show_step(2)
                         self.dialog.update()
                         forms = self.page_shift.winfo_children()
