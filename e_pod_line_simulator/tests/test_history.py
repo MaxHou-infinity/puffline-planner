@@ -31,6 +31,21 @@ def test_append_and_load_round_trip(tmp_path):
     assert "daily_output" in history[0]["kpis"]
 
 
+def test_kpi_series_skips_missing_actual_cost(tmp_path):
+    path = str(tmp_path / "history.json")
+    append_snapshot(build_snapshot(make_line()), path)
+    from src.models import SimulationResult
+
+    result = SimulationResult(
+        line_name="零产出", duration_seconds=60, total_output=0,
+        station_outputs={}, station_wips={}, kpis={"actual_unit_cost": None, "daily_output": 3},
+    )
+    append_snapshot(build_snapshot(make_line(), result), path)
+    history = load_history(path)
+    assert kpi_series(history, "actual_unit_cost") == []
+    assert len(kpi_series(history, "daily_output")) == 2
+
+
 def test_kpi_series_extracts_values(tmp_path):
     path = str(tmp_path / "history.json")
     line = make_line()

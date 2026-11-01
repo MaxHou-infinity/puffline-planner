@@ -251,6 +251,74 @@ def test_late_analysis_result_is_discarded_after_revision_change(window, monkeyp
     assert '过期' in window.status_bar.text
 
 
+def test_compute_shift_runs_sync_and_refreshes_result(window, monkeypatch):
+    from src.models import Alert
+
+    seen = []
+
+    class Engine:
+        def __init__(self, line):
+            self.line = line
+            self.random_seed = None
+
+        def run_sync(self, duration_hours, cancel_event=None):
+            seen.append((duration_hours, self.random_seed, cancel_event))
+            return NS(
+                line_name="新产线", unit="件",
+                line_config={"production_type": "assembly"},
+                total_output=4, duration_seconds=duration_hours * 3600, run_id="",
+                elapsed_seconds=0, status="completed",
+                kpis={"actual_unit_cost": 1.25},
+                alerts=[Alert("info", "info", "s01", "缓冲区接近上限")],
+            )
+
+    class Progress:
+        cancel_event = "token"
+
+        def __call__(self, value):
+            seen.append(value)
+
+    window.btn_compute = Widget()
+    window._shift_compute = False
+    window.alert_panel = NS(
+        clear=lambda: seen.append("cleared"),
+        add_alert=lambda alert: seen.append(alert.message),
+    )
+    window.kpi_dashboard.reset_timestamp = lambda: None
+    window.kpi_dashboard.set_run_state = lambda state: seen.append(state)
+    window._reset_canvas_after_run = lambda: seen.append("canvas")
+    monkeypatch.setattr(gui_main, "SimulationEngine", Engine)
+    def remember(record):
+        seen.append(record["source"])
+        return True
+
+    monkeypatch.setattr(gui_main, "append_snapshot", remember)
+
+    def start(work, done, status, finished_status="分析完成"):
+        assert status == "正在计算本班结果..."
+        assert finished_status == "本班结果已计算"
+        assert window.btn_compute.text == "计算中"
+        done(work(Progress()))
+
+    window._start_analysis_job = start
+    window._btn_compute_shift()
+    assert seen[0] == "cleared"
+    assert "computing" in seen
+    assert (window.production_line.shift_hours, 0, "token") in seen
+    assert "simulation" in seen
+    assert "缓冲区接近上限" in seen
+    assert "canvas" in seen
+    assert window.last_result.total_output == 4
+
+
+def test_animation_pace_can_change_after_start():
+    engine = SimulationEngine.__new__(SimulationEngine)
+    engine.speed = 32
+    assert engine._animation_pace(1) == 32
+    engine.speed = 0
+    assert engine._animation_pace(8) == 8
+
+
 def test_running_engine_uses_detached_parameter_snapshot(window, monkeypatch):
     class Engine:
         def __init__(self, line):

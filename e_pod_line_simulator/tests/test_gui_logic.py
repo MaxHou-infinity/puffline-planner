@@ -292,6 +292,61 @@ def test_help_dialog_exists():
     assert hasattr(HelpDialog, "HELP_TEXT")
     assert "停机切换" in HelpDialog.HELP_TEXT
     assert "Ctrl+S" in HelpDialog.HELP_TEXT
+    assert "计算本班结果" in HelpDialog.HELP_TEXT
+    assert "口味" not in HelpDialog.HELP_TEXT
+
+
+def test_expected_versus_actual_labels_and_zero_output():
+    from src.gui_panels import (
+        CHANGEOVER_HELP,
+        SCENARIO_COMPARE_HELP,
+        SWEEP_HELP,
+        SweepDialog,
+        WizardDialog,
+        describe_history_storage,
+        format_actual_unit_cost,
+        format_effective_takt,
+        history_actual_cost_text,
+    )
+    from src.models import Station
+
+    machine = Station("s01", "功能测试", 99, 1, machine_takt=20)
+    manual = Station("s02", "零件装配", 25, 2)
+    assert format_effective_takt(machine) == "20.0（机台）"
+    assert format_effective_takt(manual) == "25.0"
+    assert format_actual_unit_cost(None) == "无法计算"
+    assert history_actual_cost_text({"unit_cost": 1.2}) == "无法计算"
+    assert history_actual_cost_text({"unit_cost": 1.2, "actual_unit_cost": None}) == "无法计算"
+    assert history_actual_cost_text({"actual_unit_cost": 0.5}) == "0.500"
+    assert WizardDialog.AUTO_START_DEFAULT is False
+    assert SweepDialog.METRIC_LABELS["total_output"] == "本次总产出"
+    assert SweepDialog.METRIC_LABELS["unit_cost"] == "本次单位人工成本"
+    assert SweepDialog.METRIC_LABELS["upph"] == "预计 UPPH"
+    assert "2-5" not in SCENARIO_COMPARE_HELP
+    assert "最多保存 5 个" in SCENARIO_COMPARE_HELP
+    assert "3 个" in SCENARIO_COMPARE_HELP
+    assert "镭雕" not in SWEEP_HELP
+    assert "零件装配" in SWEEP_HELP
+    assert "configs/run_history.json" not in describe_history_storage()
+    assert "应用支持目录" in describe_history_storage()
+    assert "口味" not in CHANGEOVER_HELP
+
+
+def test_station_editor_validation_covers_buffer_and_efficiency():
+    from src.gui_panels import validate_station_in_line
+    from src.models import Station
+
+    line = build_template_line("simple")
+    station = Station("s01", "零件装配", 25, 2, buffer_capacity=8, efficiency=0.9)
+    assert validate_station_in_line(line, station, "s01")[0] is True
+    station.buffer_capacity = 0
+    assert validate_station_in_line(line, station, "s01")[0] is False
+    station.buffer_capacity = 8
+    station.efficiency = 1.4
+    ok, message = validate_station_in_line(line, station, "s01")
+    assert ok is False
+    assert "人员效率" in message
+    assert "efficiency" not in message
 
 
 def test_about_dialog_class_and_urls():
