@@ -33,6 +33,16 @@ def test_modern_controls_and_small_window_workflows(monkeypatch, tmp_path):
         app.main_paned.sashpos(1, max(left + 200, total - alert))
         app.root.update()
         assert app.config_panel.tree.xview()[1] > 0.98
+        tree = app.config_panel.tree
+        assert tree.column('#0')['width'] == 0
+        assert tree.column('#0')['stretch'] == 0
+        for column in ('name', 'time', 'workers', 'capacity'):
+            assert tree.heading(column)['anchor'] == 'w'
+            assert tree.column(column)['anchor'] == 'w'
+        tree.heading('capacity', text='产能/件')
+        app.config_panel.set_unit('件')
+        assert tree.heading('capacity')['text'] == '产能/件'
+        assert tree.heading('capacity')['anchor'] == 'w'
         app.root.geometry('1000x620')
         app.root.update()
         assert app.alert_panel.text_widget.cget('background') == COLORS['surface']

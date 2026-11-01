@@ -116,13 +116,33 @@ def station_column_spec() -> dict:
 
     非拉伸列的 width 之和加上名称列 minwidth，要能放进约 1280 宽窗口的
     左侧树（大约 300px），这样表头不用横向滚动。
+    表头和单元格都用靠左锚点，避免表头在列宽里居中、和下面的值错位。
     """
     return {
-        "name": {"width": 96, "minwidth": 72, "stretch": True},
-        "time": {"width": 84, "minwidth": 76, "stretch": False},
-        "workers": {"width": 44, "minwidth": 40, "stretch": False},
-        "capacity": {"width": 72, "minwidth": 64, "stretch": False},
+        "name": {"width": 96, "minwidth": 72, "stretch": True, "anchor": tk.W},
+        "time": {"width": 84, "minwidth": 76, "stretch": False, "anchor": tk.W},
+        "workers": {"width": 44, "minwidth": 40, "stretch": False, "anchor": tk.W},
+        "capacity": {"width": 72, "minwidth": 64, "stretch": False, "anchor": tk.W},
     }
+
+
+def apply_station_columns(tree, unit: str = "颗") -> None:
+    """按同一套锚点和列宽摆工序表。
+
+    ``#0`` 是树形展开列。``show='headings'`` 时它仍可能占默认宽度，
+    把表头相对单元格整体挤偏，所以宽度收成 0。
+    """
+    tree.column("#0", width=0, minwidth=0, stretch=False, anchor=tk.W)
+    tree.heading("#0", text="", anchor=tk.W)
+    headings = {
+        "name": "工序名称",
+        "time": "节拍(秒)",
+        "workers": "人数",
+        "capacity": capacity_heading(unit),
+    }
+    for column_id, options in station_column_spec().items():
+        tree.column(column_id, **options)
+        tree.heading(column_id, text=headings[column_id], anchor=tk.W)
 
 
 def place_dialog_on_screen(
@@ -531,16 +551,8 @@ class ConfigPanel(ttk.Frame):
         # 创建Treeview（表格视图）
         columns = ('name', 'time', 'workers', 'capacity')
         self.tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=12)
-        
-        # 设置列标题
-        self.tree.heading('name', text='工序名称')
-        self.tree.heading('time', text='节拍(秒)')
-        self.tree.heading('workers', text='人数')
-        self.tree.heading('capacity', text=capacity_heading('颗'))
-        
-        # 宽度来自 station_column_spec()，保证四列表头能在笔记本左侧栏看全。
-        for column_id, options in station_column_spec().items():
-            self.tree.column(column_id, **options)
+        # 表头默认居中；名称列被拉宽后标题会漂到列中间，这里改成和单元格一样靠左。
+        apply_station_columns(self.tree)
         
         # 绑定选择事件
         self.tree.bind('<<TreeviewSelect>>', self._on_select)
@@ -648,7 +660,7 @@ class ConfigPanel(ttk.Frame):
     def set_unit(self, unit: str) -> None:
         """按生产类型更新工序列表产能单位"""
         if hasattr(self, 'tree'):
-            self.tree.heading('capacity', text=capacity_heading(unit))
+            self.tree.heading('capacity', text=capacity_heading(unit), anchor=tk.W)
     
     def _on_select(self, event: tk.Event) -> None:
         """工序选择事件"""

@@ -103,12 +103,14 @@ def test_layout_helpers_fit_laptop_and_short_wizard():
     """1280 宽工序栏能放下四列表头；矮屏幕上向导仍整窗留在屏幕内。"""
     from src.gui_main import default_pane_widths, project_heading
     from src.gui_panels import place_dialog_on_screen, station_column_spec
+    import tkinter as tk
     from src.version import PRODUCT_NAME
 
     assert project_heading(None) == ""
     assert project_heading("  新产线  ") == "新产线"
     assert PRODUCT_NAME not in project_heading("")
     spec = station_column_spec()
+    assert {item["anchor"] for item in spec.values()} == {tk.W}
     minimum = spec["name"]["minwidth"] + sum(
         item["width"] for key, item in spec.items() if key != "name"
     )

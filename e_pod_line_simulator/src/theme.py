@@ -256,10 +256,12 @@ def apply_theme(root) -> dict:
         'Treeview.Heading',
         font=(family, -12),
         relief='flat',
-        padding=(4, 3),
+        padding=(2, 3),
         background=COLORS['surface'],
         foreground=COLORS['text'],
     )
+    # 表头元素自带约 3px 边，单元格文字从列边起约 5px。
+    # 左右内边距 2 让靠左表头和单元格从同一位置起笔。
     style.configure(
         'TEntry',
         fieldbackground=COLORS['surface'],
