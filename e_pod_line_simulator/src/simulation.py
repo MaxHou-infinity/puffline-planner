@@ -166,7 +166,7 @@ class SimulationEngine:
 
     def trigger_changeover(self, station_id: str, minutes: int = 45) -> bool:
         """
-        触发指定工序的切换（口味更换）停机事件
+        触发指定工序的切换（型号或规格更换）停机事件
 
         Args:
             station_id: 工序 ID
@@ -810,6 +810,14 @@ class SimulationEngine:
         self.env.process(self._monitor_starvation())
         self.env.process(self._update_state_periodically())
 
+    def _animation_pace(self, fallback: float) -> float:
+        """演示倍速。非法值退回启动时的倍速，避免等待时间变成 0 或负数。"""
+        pace = self.speed
+        if (isinstance(pace, bool) or not isinstance(pace, (int, float))
+                or not math.isfinite(pace) or pace <= 0):
+            return fallback
+        return float(pace)
+
     def run(self, duration_hours: float = 8.0, speed: int = 16) -> None:
         """以指定演示速度启动后台仿真；速度不影响业务日历。"""
         if not math.isfinite(speed) or speed <= 0:
@@ -1302,7 +1310,8 @@ class SimulationEngine:
                 previous = self.env.now
                 target = min(previous + 1.0, duration_seconds)
                 self.env.run(until=target)
-                self._stop_event.wait((target - previous) / speed)
+                # 只改变墙钟等待，仿真步长仍是 1 秒；运行中改 self.speed 才能让速度下拉生效。
+                self._stop_event.wait((target - previous) / self._animation_pace(speed))
             self.status = "completed" if self.env.now >= duration_seconds else "stopped"
         except Exception as error:
             self.status = "failed"

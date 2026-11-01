@@ -24,6 +24,8 @@ def test_glossary_text_output():
     assert "WIP：在制品" in text
     assert "日成本：总人数 × 时薪 × 班次时长（元/天）。" in text
     assert "单位成本：理论口径" in text
+    assert "确定性节拍折减" in text
+    assert "不是随机停机" in text
     assert "机台节拍" in text and "质量门" in text
 
 

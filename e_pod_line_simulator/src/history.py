@@ -1,7 +1,7 @@
 """
 KPI 历史趋势（V3.2 P1）
 
-跨运行记录 KPI 快照，保存到 configs/run_history.json，供趋势表/图使用。
+跨运行记录 KPI 快照，保存到应用支持目录中的 run_history.json，供趋势表/图使用。
 """
 
 import json
@@ -124,12 +124,14 @@ def kpi_series(
     history: List[Dict[str, Any]],
     kpi_name: str,
 ) -> List[Tuple[str, float]]:
-    """返回 [(时间, 值)] 序列"""
-    return [
-        (record.get("timestamp", ""), record.get("kpis", {}).get(kpi_name, 0.0))
-        for record in history
-        if record.get("kpis", {}).get(kpi_name, 0.0) is not None
-    ]
+    """返回 [(时间, 值)]。缺失或空值不画成 0，避免零产出成本被看成免费。"""
+    series = []
+    for record in history:
+        kpis = record.get("kpis") or {}
+        if kpi_name not in kpis or kpis.get(kpi_name) is None:
+            continue
+        series.append((record.get("timestamp", ""), float(kpis[kpi_name])))
+    return series
 
 
 def export_history(

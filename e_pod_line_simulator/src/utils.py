@@ -92,6 +92,28 @@ def get_scenarios_path() -> str:
     return get_user_data_path("scenarios.json", migrate=True)
 
 
+def locate_example_config(filename: str = "consumer-hardware-demo.json") -> Optional[str]:
+    """向上查找 examples 目录，供「打开配置」和空画布示例使用。
+
+    源码运行时示例在仓库根目录；打包后若随应用带上 examples，也能从可执行文件旁找到。
+    找不到时返回 None，由界面改走文件对话框，避免把仓库相对路径写死。
+    """
+    roots = [Path(__file__).resolve()]
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve())
+    seen = set()
+    for root in roots:
+        for parent in (root.parent, *root.parents):
+            key = str(parent)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate = parent / "examples" / filename
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def get_first_run_marker_path() -> str:
     """首次运行标记文件路径（存在即视为已完成引导）"""
     return os.path.join(get_app_data_dir(), "first_run.json")

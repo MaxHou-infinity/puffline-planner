@@ -62,6 +62,8 @@ from src.utils import (
     mark_first_run_done,
     should_show_first_run,
     get_scenarios_path,
+    load_config,
+    locate_example_config,
 )
 from src.scenario_manager import ScenarioManager
 from src.reporting import export_report
@@ -117,6 +119,7 @@ class MainWindow:
         self.simulation_engine: Optional[SimulationEngine] = None  # 仿真引擎
         self._state_queue = Queue(maxsize=1)
         self._analysis_busy = False
+        self._shift_compute = False
         self._analysis_job = None
         self._config_revision = 0
         self.last_result = None
@@ -175,6 +178,7 @@ class MainWindow:
         self.file_menu = file_menu
         menubar.add_cascade(label="文件", menu=file_menu)
         file_menu.add_command(label="快速配置向导...", command=deferred(self._menu_wizard))
+        file_menu.add_command(label="打开配置...", command=deferred(self._menu_open_config))
         file_menu.add_separator()
         file_menu.add_command(label="保存方案...", command=deferred(self._btn_save_scenario))
         file_menu.add_separator()
@@ -276,6 +280,11 @@ class MainWindow:
             command=self._menu_wizard,
             style="Accent.TButton",
         ).pack(side=tk.LEFT)
+        ttk.Button(
+            self.empty_banner,
+            text="打开示例配置",
+            command=self._open_hardware_example,
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         canvas_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
@@ -326,6 +335,17 @@ class MainWindow:
             style="Accent.TButton",
         )
         self.btn_start.pack(side=tk.LEFT, padx=5)
+        self.btn_compute = ttk.Button(
+            control_frame,
+            text="计算本班结果",
+            command=self._btn_compute_shift,
+            style="Secondary.TButton",
+        )
+        self.btn_compute.pack(side=tk.LEFT, padx=5)
+        ToolTip(
+            self.btn_compute,
+            "立刻算完本班，不播放动画；完成后刷新本次产出、报警和 KPI 历史。",
+        )
         
         # 暂停按钮
         self.btn_pause = ttk.Button(
@@ -358,7 +378,7 @@ class MainWindow:
         self.btn_changeover.pack(side=tk.LEFT, padx=5)
         ToolTip(
             self.btn_changeover,
-            "仿真运行中，手动触发所选工序的换型停机（如更换口味/规格/配方）",
+            "仿真运行中，手动触发所选工序的换型停机（如更换型号或规格）",
         )
         
         # 速度选择
@@ -376,6 +396,7 @@ class MainWindow:
         )
         speed_combo.pack(side=tk.LEFT)
         self.speed_combo = speed_combo
+        speed_combo.bind("<<ComboboxSelected>>", self._on_speed_changed)
         
         self.btn_output_unit = ttk.Button(
             action_frame, text="产出单位", command=self._configure_output_unit)
@@ -399,7 +420,7 @@ class MainWindow:
         ToolTip(self.btn_stop, "停止仿真")
         ToolTip(self.btn_config_shift, "配置班次时长 / 休息时间 / 时薪")
         ToolTip(self.btn_save_scenario, "保存当前产线配置为方案")
-        ToolTip(self.speed_combo, "仿真速度倍数（1x-64x）")
+        ToolTip(self.speed_combo, "演示动画倍速（1x-64x）；运行中修改立即生效，不改变本班业务时间")
         
         actions = [self.btn_changeover, self.btn_output_unit,
                    self.btn_config_shift, self.btn_save_scenario]
@@ -615,6 +636,60 @@ class MainWindow:
         if dialog.result.get("auto_start") and self.production_line.stations:
             self._btn_start_simulation()
 
+    def _menu_open_config(self) -> None:
+        """文件菜单：打开 JSON 配置。未保存时沿用现有确认。"""
+        if not self._can_change_configuration() or not self._confirm_discard():
+            return
+        example = locate_example_config()
+        initial = os.path.dirname(example) if example else None
+        path = filedialog.askopenfilename(
+            title="打开配置",
+            initialdir=initial or "",
+            filetypes=[("产线配置", "*.json"), ("所有文件", "*.*")],
+        )
+        if path:
+            self._load_config_file(path)
+
+    def _open_hardware_example(self) -> None:
+        """空画布快捷入口：直接打开消费硬件示例，找不到再交给文件对话框。"""
+        if not self._can_change_configuration() or not self._confirm_discard():
+            return
+        path = locate_example_config()
+        if path:
+            self._load_config_file(path)
+            return
+        messagebox.showinfo(
+            "未找到示例",
+            "未找到 examples/consumer-hardware-demo.json，请手动选择配置文件。",
+        )
+        example = locate_example_config()
+        initial = os.path.dirname(example) if example else None
+        path = filedialog.askopenfilename(
+            title="打开配置",
+            initialdir=initial or "",
+            filetypes=[("产线配置", "*.json"), ("所有文件", "*.*")],
+        )
+        if path:
+            self._load_config_file(path)
+
+    def _load_config_file(self, path: str) -> None:
+        """读取配置并刷新主界面。失败不替换当前产线。"""
+        try:
+            line = load_config(path)
+        except Exception as exc:
+            self.logger.exception("打开配置失败")
+            messagebox.showerror("打开失败", str(exc))
+            return
+        if line is None:
+            messagebox.showerror("打开失败", "无法读取该配置，请检查 JSON 格式与工序参数。")
+            return
+        self.production_line = line
+        self._invalidate_results()
+        self._dirty = False
+        self._update_title()
+        self._update_display()
+        self.status_bar.config(text=f"已打开配置：{line.name}")
+
     def _open_first_run_wizard(self) -> None:
         """首次运行：自动打开快速配置向导（完成或取消后不再自动弹出）"""
         self.logger.info("首次运行：自动打开快速配置向导")
@@ -771,7 +846,7 @@ class MainWindow:
             self._busy_control_states = {
                 widget: str(widget.cget("state"))
                 for widget in (
-                    self.btn_start, self.btn_pause, self.btn_stop,
+                    self.btn_start, self.btn_compute, self.btn_pause, self.btn_stop,
                     self.btn_changeover, self.btn_save_scenario,
                     self.btn_config_shift, self.speed_combo,
                 )
@@ -784,7 +859,10 @@ class MainWindow:
                 self.menubar.entryconfig(label, state=tk.DISABLED)
             self.analysis_progress.pack(side=tk.RIGHT, padx=6)
             self.analysis_progress.start(10)
-            self.btn_cancel_analysis.config(state=tk.NORMAL)
+            self.btn_cancel_analysis.config(
+                state=tk.NORMAL,
+                text="取消" if getattr(self, "_shift_compute", False) else "取消分析",
+            )
             self.btn_cancel_analysis.pack(side=tk.RIGHT, padx=4)
         else:
             self.analysis_progress.stop()
@@ -799,8 +877,12 @@ class MainWindow:
                 self.menubar.entryconfig(label, state=tk.NORMAL)
             if running:
                 self._lock_configuration(True)
+            else:
+                self.btn_compute.config(text="计算本班结果")
 
-    def _start_analysis_job(self, work, on_success, status: str) -> None:
+    def _start_analysis_job(
+        self, work, on_success, status: str, finished_status: str = "分析完成",
+    ) -> None:
         if self._analysis_busy:
             return
         self._set_analysis_busy(True)
@@ -808,26 +890,43 @@ class MainWindow:
         revision = self._config_revision
 
         def success(value):
+            computing = self._shift_compute
+            self._shift_compute = False
             self._set_analysis_busy(False)
             self._analysis_job = None
             if revision != self._config_revision:
+                if computing:
+                    self.kpi_dashboard.set_run_state("stopped")
                 self.status_bar.config(text="配置已变化，已丢弃过期分析结果")
                 return
             on_success(value)
-            self.status_bar.config(text="分析完成")
+            if computing:
+                self.kpi_dashboard.set_run_state("stopped")
+            override = getattr(self, "_result_status", None)
+            self._result_status = None
+            self.status_bar.config(text=override or finished_status)
 
         def error(exc):
+            computing = self._shift_compute
+            self._shift_compute = False
             self._set_analysis_busy(False)
             self._analysis_job = None
+            if computing:
+                self.kpi_dashboard.set_run_state("stopped")
             self.logger.error("后台分析失败：%s", exc)
             messagebox.showerror("分析失败", f"{exc}\n\n详细日志：logs/app.log")
-            self.status_bar.config(text="分析失败")
+            self.status_bar.config(text="计算失败" if computing else "分析失败")
 
         def cancelled():
+            computing = self._shift_compute
+            self._shift_compute = False
             self._set_analysis_busy(False)
             self._analysis_job = None
-            self.status_bar.config(text="分析已取消")
+            if computing:
+                self.kpi_dashboard.set_run_state("stopped")
+            self.status_bar.config(text="本班计算已取消" if computing else "分析已取消")
 
+        self._shift_compute = getattr(self, "_shift_compute", False)
         self._analysis_job = BackgroundJob(
             self.root, work, success, error,
             on_progress=lambda value: self.status_bar.config(text=str(value)),
@@ -1054,14 +1153,28 @@ class MainWindow:
             return False
         return True
 
+    def _set_file_command_state(self, state: str, labels) -> None:
+        """按菜单文字锁定命令，避免插入新菜单项后下标错位。"""
+        end = self.file_menu.index("end")
+        if end is None:
+            return
+        wanted = set(labels)
+        for index in range(end + 1):
+            if self.file_menu.type(index) != "command":
+                continue
+            if self.file_menu.entrycget(index, "label") in wanted:
+                self.file_menu.entryconfig(index, state=state)
+
     def _lock_configuration(self, locked: bool) -> None:
         self.config_panel.set_editable(not locked)
         self.canvas_view.drag_enabled = not locked
         self.btn_config_shift.config(state=tk.DISABLED if locked else tk.NORMAL)
         self.btn_save_scenario.config(state=tk.DISABLED if locked else tk.NORMAL)
+        self.btn_compute.config(state=tk.DISABLED if locked else tk.NORMAL)
         state = tk.DISABLED if locked else tk.NORMAL
-        self.file_menu.entryconfig(0, state=state)
-        self.file_menu.entryconfig(2, state=state)
+        self._set_file_command_state(
+            state, ("快速配置向导...", "打开配置...", "保存方案..."),
+        )
         for label in ('分析', '方案'):
             self.menubar.entryconfig(label, state=state)
 
@@ -1108,6 +1221,45 @@ class MainWindow:
         else:
             self._btn_start_simulation()
         return 'break'
+
+    def _on_speed_changed(self, _event=None) -> None:
+        """运行中改演示倍速。只写引擎的墙钟倍速，不重开仿真。"""
+        engine = self.simulation_engine
+        if engine is None or not getattr(engine, "is_running", False):
+            return
+        try:
+            pace = int(self.speed_var.get())
+        except (TypeError, ValueError):
+            return
+        if pace > 0:
+            engine.speed = pace
+
+    def _record_finished_run(self, result, run_line) -> None:
+        """与动画仿真自然结束相同：本次产出、时间戳和 KPI 历史。"""
+        copied = copy.deepcopy(result)
+        self.last_result = copied
+        self._last_result_revision = run_line.configuration_revision()
+        self.kpi_dashboard.update_actual_output(copied.total_output)
+        elapsed = (copied.elapsed_seconds if getattr(copied, "run_id", "")
+                   else copied.duration_seconds)
+        self.kpi_dashboard.update_timestamp(elapsed / 60.0)
+        if not append_snapshot(build_snapshot(run_line, copied)):
+            raise OSError("KPI 历史快照未能保存")
+
+    def _reset_canvas_after_run(self) -> None:
+        """结束后画布回到空闲，避免把上一轮在制当成当前配置。"""
+        if self.canvas_view and self.production_line:
+            self.canvas_view.simulation_state = None
+            for station in self.production_line.stations:
+                station.current_status = "idle"
+                station.wip_count = 0
+            self.canvas_view.update_production_line(self.production_line)
+
+    def _show_result_alerts(self, result) -> None:
+        """同步计算没有逐条推送，完成后一次性刷入本班报警。"""
+        self.alert_panel.clear()
+        for alert in getattr(result, "alerts", None) or []:
+            self.alert_panel.add_alert(alert)
     
     # ==================== 按钮事件处理 ====================
     
@@ -1171,9 +1323,8 @@ class MainWindow:
             self.kpi_dashboard.reset_timestamp()  # 重置时间戳
             self.kpi_dashboard.update_actual_output(0)
             self.kpi_dashboard.set_run_state('running')
-            # 运行中禁用编辑/速度/拖拽，避免无效操作
+            # 运行中锁定配置；速度下拉保持可用，只影响动画墙钟。
             self._lock_configuration(True)
-            self.speed_combo.config(state=tk.DISABLED)
         else:
             # 暂停后继续
             self.kpi_dashboard.set_run_state('running')
@@ -1195,6 +1346,53 @@ class MainWindow:
         self.status_bar.config(text="仿真运行中...")
         engine = self.simulation_engine
         self.root.after(100, lambda: self._poll_simulation_completion(engine))
+
+    def _btn_compute_shift(self) -> None:
+        """立刻算完本班。走 run_sync，收尾与仿真自然完成一致。"""
+        if self._analysis_busy:
+            return
+        if self.simulation_engine and self.simulation_engine.is_running:
+            messagebox.showinfo("请先停止仿真", "演示仿真进行中，请停止后再计算本班结果。")
+            return
+        if self.production_line is None or not self.production_line.stations:
+            messagebox.showwarning("警告", "请先添加至少一个工序")
+            return
+        valid, error = validate_production_line(self.production_line)
+        if not valid:
+            messagebox.showerror("错误", f"产线配置无效：{error}")
+            return
+        line = copy.deepcopy(self.production_line)
+        duration = line.shift_hours
+        self._shift_compute = True
+        self.alert_panel.clear()
+        self.kpi_dashboard.reset_timestamp()
+        self.kpi_dashboard.update_actual_output(0)
+        self.kpi_dashboard.set_run_state("computing")
+        self.btn_compute.config(text="计算中")
+
+        def work(progress):
+            progress("正在计算本班结果...")
+            engine = SimulationEngine(line)
+            engine.random_seed = 0
+            return engine.run_sync(
+                duration_hours=duration, cancel_event=progress.cancel_event,
+            )
+
+        def done(result):
+            try:
+                self._record_finished_run(result, line)
+                self._show_result_alerts(result)
+                self._reset_canvas_after_run()
+            except Exception as exc:
+                self.logger.exception("记录本班结果失败")
+                self._result_status = "本班已算完，历史快照未保存"
+                messagebox.showwarning(
+                    "记录失败", f"本班已算完，但历史快照未保存：{exc}",
+                )
+
+        self._start_analysis_job(
+            work, done, "正在计算本班结果...", finished_status="本班结果已计算",
+        )
 
     def _poll_simulation_completion(self, engine: SimulationEngine) -> None:
         """Observe worker completion on the Tk thread and restore controls."""
@@ -1229,17 +1427,9 @@ class MainWindow:
             try:
                 engine.stop()
                 stopped = True
-                self.kpi_dashboard.update_actual_output(engine.total_output)
-                result = copy.deepcopy(engine.build_result())
-                self.last_result = result
+                result = engine.build_result()
                 run_line = self._run_line or self.production_line
-                self._last_result_revision = run_line.configuration_revision()
-                elapsed = (result.elapsed_seconds if getattr(result, "run_id", "")
-                           else result.duration_seconds)
-                self.kpi_dashboard.update_timestamp(elapsed / 60)
-                saved = append_snapshot(build_snapshot(run_line, result))
-                if not saved:
-                    raise OSError("KPI 历史快照未能保存")
+                self._record_finished_run(result, run_line)
             except Exception as exc:
                 self.logger.exception("记录仿真快照失败")
                 messagebox.showwarning("记录失败", f"仿真已结束，但历史快照未保存：{exc}")
@@ -1256,15 +1446,7 @@ class MainWindow:
                 self.btn_stop.config(state=tk.DISABLED)
                 self.btn_changeover.config(state=tk.DISABLED)
                 
-                # 重置画布状态（如果有的话）
-                if self.canvas_view and self.production_line:
-                    self.canvas_view.simulation_state = None
-                    # 重置所有工序状态为idle
-                    for station in self.production_line.stations:
-                        station.current_status = "idle"
-                        station.wip_count = 0
-                    # 更新画布显示
-                    self.canvas_view.update_production_line(self.production_line)
+                self._reset_canvas_after_run()
                 
                 # 注意：停止时不清空报警信息，只在重新开始仿真时清空
                 self.status_bar.config(text="仿真已完成" if completed else "仿真已停止")
@@ -1403,6 +1585,8 @@ class MainWindow:
             station.sampling_rate = updated.sampling_rate
             station.defect_rate = updated.defect_rate
             station.rework_minutes = updated.rework_minutes
+            station.efficiency = updated.efficiency
+            station.buffer_capacity = updated.buffer_capacity
             
             self._mark_dirty()
             self._update_display()

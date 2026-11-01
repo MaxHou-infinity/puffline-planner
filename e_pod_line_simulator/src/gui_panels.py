@@ -30,7 +30,9 @@ from src.models import (
 )
 from src.utils import (
     validate_station,
+    validate_production_line,
     get_alert_color,
+    get_app_data_dir,
     parse_shift_params,
     resolve_template_reset,
 )
@@ -79,6 +81,98 @@ from src.gui_jobs import BackgroundJob, set_dialog_busy
 def format_cost(value, digits=3):
     """Zero output has no unit cost; never render it as a free product."""
     return "不可计算" if value is None else f"{value:.{digits}f}"
+
+
+def format_actual_unit_cost(value, digits=3) -> str:
+    """本次单位人工成本。零产出或空值显示「无法计算」，不显示成 0。"""
+    if value is None or isinstance(value, bool):
+        return "无法计算"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "无法计算"
+    if not math.isfinite(number):
+        return "无法计算"
+    return f"{number:.{digits}f}"
+
+
+def format_effective_takt(station) -> str:
+    """列表节拍与产能公式一致：有机台节拍用机台，否则用单件加工时间。"""
+    if station.machine_takt is not None:
+        return f"{float(station.machine_takt):.1f}（机台）"
+    return f"{float(station.process_time):.1f}"
+
+
+def history_actual_cost_text(kpis) -> str:
+    """历史表「本次」列只读 actual_unit_cost；未仿真的快照没有该字段。"""
+    if not isinstance(kpis, dict) or "actual_unit_cost" not in kpis:
+        return "无法计算"
+    return format_actual_unit_cost(kpis.get("actual_unit_cost"))
+
+
+def describe_history_storage() -> str:
+    """说明历史文件在应用支持目录，避免用户去仓库 configs 里找。"""
+    folder = get_app_data_dir()
+    return (
+        "目的：查看跨运行 KPI 变化趋势，评估优化效果。\n"
+        "记录时机：点击「记录当前产线」立即记录；"
+        "仿真完成或「计算本班结果」后自动记录。\n"
+        f"历史保存在应用支持目录（当前：{folder}）中的 run_history.json，最多 200 条。"
+        "该目录随操作系统变化，不要到项目仓库里查找。"
+    )
+
+
+def validate_station_in_line(production_line, station, replace_id=None):
+    """在产线副本上替换或追加工序，再走现有产线校验。"""
+    if production_line is not None:
+        probe = copy.deepcopy(production_line)
+    else:
+        probe = ProductionLine("新产线")
+    replacement = copy.deepcopy(station)
+    if replace_id is None:
+        probe.add_station(replacement)
+    else:
+        replaced = False
+        for index, existing in enumerate(probe.stations):
+            if existing.id == replace_id:
+                probe.stations[index] = replacement
+                replaced = True
+                break
+        if not replaced:
+            probe.add_station(replacement)
+    return validate_production_line(probe)
+
+
+SCENARIO_COMPARE_HELP = (
+    "目的：一次最多对比 3 个已保存方案的 KPI，并给出推荐。\n"
+    "方案库最多保存 5 个；一次对比的上限是 3 个，与方案库上限不同。\n"
+    "推荐依据：默认按预计单位人工成本最低推荐。\n"
+    "差异列 = 各方案相对第一个方案（基准）的差值。"
+)
+
+SWEEP_HELP = (
+    "目的：对同一参数的一组取值批量仿真，观察产出/成本/UPPH 变化。\n"
+    "参数：工序人数 / 机台数量 / 机台节拍（秒）/ OEE / 班次时长（小时），"
+    "选择后自动给出常用取值建议。\n"
+    "作用工序：下拉选择要试算的工序（列表显示 工序ID+名称，"
+    "如 s01 零件装配）；选“空=瓶颈”则自动作用于瓶颈工序。\n"
+    "取值列表：该参数要试的几个档位，每个取值运行一次仿真，"
+    "如 1,2,3 表示三档。\n"
+    "仿真时长：每次仿真的模拟时长，默认取当前产线班次。\n"
+    "列含义：本次总产出是仿真末端良品；预计日产量和预计 UPPH 来自当前配置公式；"
+    "本次单位人工成本 = 本次人工 ÷ 末端良品，零产出显示「无法计算」。"
+)
+
+CHANGEOVER_HELP = (
+    "作用：仿真运行中模拟一次换型停机（如更换型号或规格，"
+    "硬件模板常见于零件装配、功能测试），观察对上下游与产出的影响。\n"
+    "选择工序：下拉已列出全部工序（ID+名称），无需在画布或"
+    "工序列表中寻找；确认后该工序会在画布上高亮。\n"
+    "确认只提交请求；当前加工完成后开始换型，不中断在制品。"
+    "空闲工序会立即换型，暂停状态下需恢复仿真后执行。"
+)
+
+OEE_INPUT_HINT = "确定性节拍折减，不是随机停机，也不是可用率×性能率×合格率。"
 
 
 def scrollable_form(parent, padding=15):
@@ -296,13 +390,13 @@ class ConfigPanel(ttk.Frame):
         
         # 设置列标题
         self.tree.heading('name', text='工序名称')
-        self.tree.heading('time', text='耗时(秒)')
+        self.tree.heading('time', text='节拍(秒)')
         self.tree.heading('workers', text='人数')
         self.tree.heading('capacity', text='产能(颗/h)')
         
         # 设置列宽
         self.tree.column('name', width=100)
-        self.tree.column('time', width=80)
+        self.tree.column('time', width=110)
         self.tree.column('workers', width=60)
         self.tree.column('capacity', width=100)
         
@@ -345,7 +439,7 @@ class ConfigPanel(ttk.Frame):
                 tk.END,
                 values=(
                     station.name,
-                    f"{station.process_time:.1f}",
+                    format_effective_takt(station),
                     station.worker_count,
                     f"{capacity:.0f}"
                 ),
@@ -624,6 +718,7 @@ class KPIDashboard(ttk.LabelFrame):
             return
         state_map = {
             'running': ('● 运行中', COLORS['success']),
+            'computing': ('● 计算中', COLORS['primary']),
             'paused': ('⏸ 已暂停', COLORS['warning']),
             'stopped': ('■ 已停止', COLORS['text_secondary']),
         }
@@ -826,9 +921,14 @@ class AlertPanel(ttk.LabelFrame):
         self._render()
 
     def _clear(self) -> None:
-        """清空按钮"""
-        self._alerts = []
-        self._render()
+        """清空按钮。确认后再清，避免误删刚算出的本班报警。"""
+        if self._alerts and not messagebox.askyesno(
+            "确认清空",
+            "确定清空当前报警？此操作只影响界面，不删除 KPI 历史。",
+            parent=self.winfo_toplevel(),
+        ):
+            return
+        self.clear()
 
     def _toggle_collapse(self) -> None:
         """折叠/展开报警列表"""
@@ -954,6 +1054,10 @@ class StationDialog:
         self.mode_var = tk.StringVar(
             value=station.collaboration_type.value if station else "parallel")
         self.oee_var = tk.StringVar(value=str(station.oee) if station else "0.85")
+        self.efficiency_var = tk.StringVar(
+            value=str(station.efficiency) if station else "0.95")
+        self.buffer_capacity_var = tk.StringVar(
+            value=str(station.buffer_capacity) if station else "100")
         self._role_label_to_value = {label: role for role, label in JOB_ROLE_LABELS.items()}
         current_role = station.job_role.value if station else JobRole.GENERAL.value
         self.job_role_var = tk.StringVar(value=JOB_ROLE_LABELS[current_role])
@@ -982,7 +1086,8 @@ class StationDialog:
         for value, text in [('parallel', '并联'), ('collaborative', '协同')]:
             ttk.Radiobutton(modes, text=text, variable=self.mode_var, value=value).pack(
                 side=tk.LEFT, padx=(0, 14))
-        field("设备综合效率 OEE / 0–1", self.oee_var, 6, 1)
+        _, oee_entry = field("设备综合效率 OEE / 0–1", self.oee_var, 6, 1)
+        ToolTip(oee_entry, OEE_INPUT_HINT)
         self.machine_takt_label, self.machine_takt_entry = field(
             "机台节拍 / 秒", self.machine_takt_var, 8, 0)
         self.machine_count_label, self.machine_count_entry = field(
@@ -992,15 +1097,18 @@ class StationDialog:
             ToolTip(entry, "现场可行下界；留空不授权优化器缩短当前节拍。")
         field("每班计划换型 / 分钟", self.changeover_var, 10, 1)
         ToolTip(self.machine_count_entry, "机台台数决定设备能力，人数用于岗位与人工成本。")
-        section("质量与返工", 12)
+        _, efficiency_entry = field("人员效率 / 0–1", self.efficiency_var, 12, 0)
+        ToolTip(efficiency_entry, "技能与疲劳对节拍的确定性折减，和 OEE 相乘后进入产能。")
+        field("缓冲区容量", self.buffer_capacity_var, 12, 1)
+        section("质量与返工", 14)
         self.sampling_label, self.sampling_entry = field(
-            "抽检比例 / 0–1", self.sampling_var, 13, 0)
+            "抽检比例 / 0–1", self.sampling_var, 15, 0)
         self.defect_label, self.defect_entry = field(
-            "缺陷率 / 0–1", self.defect_var, 13, 1)
+            "缺陷率 / 0–1", self.defect_var, 15, 1)
         self.rework_label, self.rework_entry = field(
-            "原工序返工时间 / 分钟", self.rework_var, 15, 0)
+            "原工序返工时间 / 分钟", self.rework_var, 17, 0)
         self.clean_time_label, self.clean_time_entry = field(
-            "清洗时间 / 分钟", self.clean_time_var, 15, 1)
+            "清洗时间 / 分钟", self.clean_time_var, 17, 1)
         self._apply_type_fields()
         name_entry.focus_set()
 
@@ -1066,6 +1174,8 @@ class StationDialog:
             sampling = float(self.sampling_var.get() or 0)
             defect = float(self.defect_var.get() or 0)
             rework = float(self.rework_var.get() or 0)
+            efficiency = float(self.efficiency_var.get())
+            buffer_capacity = int(self.buffer_capacity_var.get().strip())
 
             if machine_takt is not None and machine_takt <= 0:
                 messagebox.showerror("错误", "机台节拍必须大于0")
@@ -1110,8 +1220,8 @@ class StationDialog:
                 machine_count=machine_count,
                 min_machine_takt=min_takt,
                 changeover_time=changeover,
-                efficiency=self.station.efficiency if self.station else 0.95,
-                buffer_capacity=self.station.buffer_capacity if self.station else 100,
+                efficiency=efficiency,
+                buffer_capacity=buffer_capacity,
                 bom=dict(self.station.bom) if self.station else {},
                 cleanroom_zone=self.station.cleanroom_zone if self.station else "",
                 clean_time_minutes=clean_time,
@@ -1119,6 +1229,15 @@ class StationDialog:
                 defect_rate=defect,
                 rework_minutes=rework,
             )
+            valid_line, line_error = validate_station_in_line(
+                self.production_line,
+                self.result,
+                None if self.station is None else self.station.id,
+            )
+            if not valid_line:
+                self.result = None
+                messagebox.showerror("错误", line_error or "工序参数未通过产线校验")
+                return
             
             # 关闭对话框
             self.dialog.destroy()
@@ -1281,7 +1400,7 @@ class SaveScenarioDialog:
     - 输入方案名称（必填）
     - 输入方案描述（可选）
     - 验证名称是否重复
-    - 检查方案数量限制（最多3个）
+    - 检查方案数量限制（最多5个）
     
     使用方式：
         dialog = SaveScenarioDialog(parent, scenario_manager, production_line)
@@ -1599,9 +1718,7 @@ class ScenarioCompareDialog:
         HelpSection(
             main_frame,
             "使用说明",
-            "目的：对比 2-5 个保存方案的 KPI，并给出推荐。\n"
-            "推荐依据：默认按单位成本最低推荐。\n"
-            "差异列 = 各方案相对第一个方案（基准）的差值。",
+            SCENARIO_COMPARE_HELP,
         ).pack(fill=tk.X, pady=(0, 8))
     
     def _populate_table(self) -> None:
@@ -1613,7 +1730,7 @@ class ScenarioCompareDialog:
             ('bottleneck_capacity', '瓶颈产能', f'{unit}/h', lambda x: f"{x:.0f}"),
             ('daily_output', '日产量', unit, lambda x: f"{x:.0f}"),
             ('total_cost', '日人工成本', '元', lambda x: f"{x:.0f}"),
-            ('unit_cost', '单位人工成本', f'元/{unit}', lambda x: f"{x:.2f}"),
+            ('unit_cost', '预计单位人工成本', f'元/{unit}', lambda x: f"{x:.2f}"),
             ('balance_rate', '产线平衡率', '%', lambda x: f"{x*100:.1f}%"),
             ('upph', 'UPPH', f'{unit}/人·h', lambda x: f"{x:.1f}")
         ]
@@ -1763,7 +1880,7 @@ class ScenarioManageDialog:
         self.tree.heading('name', text='方案名称')
         self.tree.heading('created_at', text='创建时间')
         self.tree.heading('description', text='描述')
-        self.tree.heading('unit_cost', text='单位人工成本')
+        self.tree.heading('unit_cost', text='预计单位人工成本')
         self.tree.column('#0', width=0, stretch=False, anchor=tk.CENTER)
         self.tree.column('name', width=140)
         self.tree.column('created_at', width=140)
@@ -2586,11 +2703,12 @@ class HistoryDialog:
 
     KPI_LABELS = {
         "bottleneck_capacity": "瓶颈产能",
-        "daily_output": "日产量",
-        "total_cost": "日人工成本",
-        "unit_cost": "实际单位人工成本",
-        "balance_rate": "平衡率",
-        "upph": "UPPH",
+        "daily_output": "预计日产量",
+        "total_cost": "预计日人工成本",
+        "unit_cost": "预计单位人工成本",
+        "actual_unit_cost": "本次单位人工成本",
+        "balance_rate": "预计平衡率",
+        "upph": "预计 UPPH",
         "batch_cycle_min": "批次周期",
         "batch_pass_rate": "批次合格率",
         "yield_rate": "收率",
@@ -2673,14 +2791,14 @@ class HistoryDialog:
         self.tree = ttk.Treeview(main, columns=columns, show="headings", height=12)
         self.tree.heading("time", text="时间")
         self.tree.heading("line", text="产线")
-        self.tree.heading("daily", text="日产量")
-        self.tree.heading("unit_cost", text="实际单位人工成本")
-        self.tree.heading("balance", text="平衡率")
-        self.tree.heading("upph", text="UPPH")
+        self.tree.heading("daily", text="预计日产量")
+        self.tree.heading("unit_cost", text="本次单位人工成本")
+        self.tree.heading("balance", text="预计平衡率")
+        self.tree.heading("upph", text="预计 UPPH")
         self.tree.column("time", width=140)
         self.tree.column("line", width=140)
-        self.tree.column("daily", width=80, anchor=tk.E)
-        self.tree.column("unit_cost", width=90, anchor=tk.E)
+        self.tree.column("daily", width=90, anchor=tk.E)
+        self.tree.column("unit_cost", width=120, anchor=tk.E)
         self.tree.column("balance", width=80, anchor=tk.E)
         self.tree.column("upph", width=90, anchor=tk.E)
         self.tree.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
@@ -2692,10 +2810,7 @@ class HistoryDialog:
         HelpSection(
             self.dialog,
             "使用说明",
-            "目的：查看跨运行 KPI 变化趋势，评估优化效果。\n"
-            "记录时机：点击「记录当前产线」立即记录；"
-            "GUI 中停止仿真时自动记录。\n"
-            "历史保存在 configs/run_history.json（最多 200 条，不入库）。",
+            describe_history_storage(),
         ).pack(fill=tk.X, pady=(6, 0))
 
     def _refresh(self) -> None:
@@ -2708,7 +2823,7 @@ class HistoryDialog:
                 record.get("timestamp", ""),
                 record.get("line_name", ""),
                 round(k.get("daily_output", 0), 1),
-                round(k.get("unit_cost", 0), 3),
+                history_actual_cost_text(k),
                 f"{k.get('balance_rate', 0) * 100:.1f}%",
                 round(k.get("upph", 0), 1),
             ))
@@ -2749,6 +2864,7 @@ class HistoryDialog:
         units = {
             'bottleneck_capacity': f'{unit}/h', 'daily_output': unit,
             'total_cost': '元', 'unit_cost': f'元/{unit}',
+            'actual_unit_cost': f'元/{unit}',
             'balance_rate': '%', 'upph': f'{unit}/人·h',
             'batch_cycle_min': '分钟', 'batch_pass_rate': '%',
             'yield_rate': '%', 'machine_oee': '%',
@@ -2899,9 +3015,9 @@ class SweepDialog:
         "shift_hours": "班次时长(小时)",
     }
     METRIC_LABELS = {
-        "total_output": "总产出",
-        "unit_cost": "实际单位人工成本",
-        "upph": "UPPH",
+        "total_output": "本次总产出",
+        "unit_cost": "本次单位人工成本",
+        "upph": "预计 UPPH",
     }
 
     def __init__(self, parent, production_line: Optional[ProductionLine]):
@@ -2994,10 +3110,10 @@ class SweepDialog:
         columns = ("label", "output", "daily", "unit_cost", "upph")
         self.tree = ttk.Treeview(main, columns=columns, show="headings", height=10)
         self.tree.heading("label", text="参数")
-        self.tree.heading("output", text="总产出")
-        self.tree.heading("daily", text="日产量")
-        self.tree.heading("unit_cost", text="实际单位人工成本")
-        self.tree.heading("upph", text="UPPH")
+        self.tree.heading("output", text="本次总产出")
+        self.tree.heading("daily", text="预计日产量")
+        self.tree.heading("unit_cost", text="本次单位人工成本")
+        self.tree.heading("upph", text="预计 UPPH")
         for col, width in (("label", 140), ("output", 100), ("daily", 100),
                            ("unit_cost", 100), ("upph", 100)):
             self.tree.column(col, width=width, anchor=tk.E if col != "label" else tk.W)
@@ -3028,16 +3144,7 @@ class SweepDialog:
         HelpSection(
             main,
             "使用说明",
-            "目的：对同一参数的一组取值批量仿真，观察产出/成本/UPPH 变化。\n"
-            "参数：工序人数 / 机台节拍（秒）/ OEE / 班次时长（小时），"
-            "选择后自动给出常用取值建议。\n"
-            "作用工序：下拉选择要试算的工序（列表显示 工序ID+名称，"
-            "如 s01 镭雕）；选“空=瓶颈”则自动作用于瓶颈工序。\n"
-            "取值列表：该参数要试的几个档位，每个取值运行一次仿真，"
-            "如 1,2,3 表示三档。\n"
-            "仿真时长：每次仿真的模拟时长，默认取当前产线班次。\n"
-            "图表指标：展示每次试算的结果指标（总产出/单位成本/UPPH），"
-            "用于观察参数取值与结果的关系；导出 Excel 可进一步分析。",
+            SWEEP_HELP,
         ).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
     def _run(self) -> None:
@@ -3109,7 +3216,7 @@ class SweepDialog:
                     row["label"],
                     row["total_output"],
                     row["daily_output"],
-                    format_cost(row["unit_cost"]),
+                    format_actual_unit_cost(row["unit_cost"]),
                     round(row["upph"], 1),
                 ))
                 if index == 0:
@@ -3143,7 +3250,7 @@ class SweepDialog:
         base_value = self.rows[0].get(metric, 0.0)
         values = [value for value in series + [base_value] if value is not None]
         if not values:
-            self.canvas.create_text(300, 80, text="零产出：单位人工成本不可计算")
+            self.canvas.create_text(300, 80, text="零产出：单位人工成本无法计算")
             return
         vmin, vmax = min(values), max(values)
         span = (vmax - vmin) or 1.0
@@ -3170,7 +3277,7 @@ class SweepDialog:
             8, 6, anchor=tk.NW,
             text=(
                 f"{self.METRIC_LABELS.get(metric, metric)} 曲线"
-                f"（基线 {format_cost(base_value, 2)}；不可计算值不绘制）"
+                f"（基线 {format_actual_unit_cost(base_value)}；无法计算的点不绘制）"
             ),
             fill=COLORS['chart_text'],
         )
@@ -3214,10 +3321,10 @@ class SweepDialog:
             df = pd.DataFrame([
                 {
                     "方案": row["label"],
-                    "总产出": row["total_output"],
-                    "日产量": row["daily_output"],
-                    "单位成本": row["unit_cost"],
-                    "UPPH": row["upph"],
+                    "本次总产出": row["total_output"],
+                    "预计日产量": row["daily_output"],
+                    "本次单位人工成本": format_actual_unit_cost(row["unit_cost"]),
+                    "预计UPPH": row["upph"],
                 }
                 for row in self.rows
             ])
@@ -3726,11 +3833,14 @@ class HelpDialog:
 
     HELP_TEXT = """【操作步骤】
 1. 首次启动会自动打开「快速配置向导」；之后可用「文件 → 快速配置向导」
-   一键生成产线，或从「方案」导入已有方案
+   一键生成产线，「文件 → 打开配置」载入 JSON（如消费硬件示例），
+   或从「方案」导入已有方案
 2. 在主界面添加/编辑工序（参数随生产类型自动适配；
    液体/包装可设置工种）
-3. 点击「开始仿真」，观察画布、KPI 与报警；
-   运行中可用「停机切换（换型）」模拟更换口味/规格/配方
+3. 「计算本班结果」立刻算完本班并刷新产出、报警与 KPI 历史；
+   「开始仿真」用于动画演示，运行中可以改速度。
+   运行中可用「停机切换（换型）」模拟更换型号或规格
+   （如零件装配、功能测试）
 4. 保存方案（主界面或「文件 → 保存方案」）；
    「方案」菜单用于方案管理 / 对比与 KPI 历史趋势
 5. 分析试算：「分析」菜单提供敏感性试算、批量试算、
@@ -3893,12 +4003,7 @@ class ChangeoverDialog:
         HelpSection(
             main,
             "使用说明",
-            "作用：仿真运行中模拟一次换型停机（如更换口味/规格/配方），"
-            "观察对上下游与产出的影响。\n"
-            "选择工序：下拉已列出全部工序（ID+名称），无需在画布或"
-            "工序列表中寻找；确认后该工序会在画布上高亮。\n"
-            "确认只提交请求；当前加工完成后开始换型，不中断在制品。"
-            "空闲工序会立即换型，暂停状态下需恢复仿真后执行。",
+            CHANGEOVER_HELP,
         ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
     def _confirm(self) -> None:
@@ -3943,6 +4048,7 @@ class WizardDialog:
     """
 
     from src.templates import ASSEMBLY_TEMPLATES as TEMPLATES
+    AUTO_START_DEFAULT = False
 
     def __init__(self, parent):
         """初始化向导对话框"""
@@ -3963,7 +4069,7 @@ class WizardDialog:
         self.shift_hours_var = tk.StringVar(value="8")
         self.break_minutes_var = tk.StringVar(value="60")
         self.wage_var = tk.StringVar(value="20.0")
-        self.auto_start_var = tk.BooleanVar(value=True)
+        self.auto_start_var = tk.BooleanVar(value=self.AUTO_START_DEFAULT)
         # V3.3.5：模板/类型变更追踪（Excel 导入保护 + 产线重建）
         self.excel_imported = False
         self._loading_template_var = False

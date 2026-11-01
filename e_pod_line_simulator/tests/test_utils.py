@@ -280,6 +280,14 @@ def test_atomic_json_failure_preserves_original(tmp_path):
     assert not list(tmp_path.glob('.puffline-*'))
 
 
+def test_locate_example_config_finds_hardware_demo():
+    from src.utils import locate_example_config
+
+    path = locate_example_config()
+    assert path is not None
+    assert path.endswith("consumer-hardware-demo.json")
+
+
 def test_data_paths_can_be_isolated_without_creating_directory(tmp_path, monkeypatch):
     from src.utils import get_app_data_dir, get_user_data_path
     isolated = tmp_path / 'isolated'
