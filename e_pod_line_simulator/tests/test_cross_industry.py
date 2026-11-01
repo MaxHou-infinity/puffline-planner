@@ -54,7 +54,7 @@ def test_unit_changes_label_without_changing_output(unit, tmp_path):
     path = tmp_path / 'report.xlsx'
     export_excel(result, str(path))
     wb = load_workbook(path)
-    assert any(f'总产出({unit})' == cell.value
+    assert any(f'本次总产出({unit})' == cell.value
                for row in wb['KPI'] for cell in row)
     pdf = tmp_path / 'report.pdf'
     export_pdf(result, str(pdf))

@@ -337,12 +337,12 @@ class ScenarioManager:
             # KPI指标列表（用于对比）
             kpi_metrics = [
                 ('total_workers', '总人数', '人'),
-                ('bottleneck_capacity', '瓶颈产能', f'{unit}/h'),
-                ('daily_output', '日产量', unit),
+                ('bottleneck_capacity', '预计瓶颈产能', f'{unit}/h'),
+                ('daily_output', '预计日产量', unit),
                 ('total_cost', '预计日人工成本', '元'),
                 ('unit_cost', '预计单位人工成本', f'元/{unit}'),
-                ('balance_rate', '产线平衡率', '%'),
-                ('upph', 'UPPH', f'{unit}/人·h')
+                ('balance_rate', '预计平衡率', '%'),
+                ('upph', '预计UPPH', f'{unit}/人·h')
             ]
             
             for metric_key, metric_name, unit in kpi_metrics:

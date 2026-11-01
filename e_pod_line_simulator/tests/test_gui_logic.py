@@ -294,6 +294,10 @@ def test_help_dialog_exists():
     assert "Ctrl+S" in HelpDialog.HELP_TEXT
     assert "计算本班结果" in HelpDialog.HELP_TEXT
     assert "口味" not in HelpDialog.HELP_TEXT
+    assert "不回答" in HelpDialog.HELP_TEXT
+    assert "没有订单、MPS 或交期承诺" in HelpDialog.HELP_TEXT
+    assert "数据字段，本版不参与派工/界面编辑" in HelpDialog.HELP_TEXT
+    assert "经典可用×性能×质量" in HelpDialog.HELP_TEXT
 
 
 def test_expected_versus_actual_labels_and_zero_output():
@@ -330,6 +334,11 @@ def test_expected_versus_actual_labels_and_zero_output():
     assert "configs/run_history.json" not in describe_history_storage()
     assert "应用支持目录" in describe_history_storage()
     assert "口味" not in CHANGEOVER_HELP
+    from src.gui_panels import OEE_INPUT_HINT, PRODUCT_SCOPE_TEXT
+    assert "经典可用×性能×质量" in OEE_INPUT_HINT
+    assert "不是随机停机" in OEE_INPUT_HINT
+    assert "这条线理论上能不能扛" in PRODUCT_SCOPE_TEXT
+    assert "这张单能不能交" in PRODUCT_SCOPE_TEXT
 
 
 def test_station_editor_validation_covers_buffer_and_efficiency():

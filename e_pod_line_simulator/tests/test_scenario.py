@@ -69,6 +69,10 @@ def test_compare_scenarios():
     assert len(comparison["scenarios"]) == 3
     assert len(comparison["differences"]) == 7
     assert "方案B" in comparison["recommendation"]
+    names = {item["metric_name"] for item in comparison["differences"]}
+    assert "预计日产量" in names
+    assert "预计平衡率" in names
+    assert "日产量" not in names
 
 
 def test_compare_scenarios_validation():
