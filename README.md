@@ -24,7 +24,7 @@ PuffLine Planner 是面向 IE 的产线预评估工具，不是 PMC 排产或 MR
 
 主路径是：打开配置 → **计算本班结果** → 看瓶颈与报告。墙钟动画（「开始仿真」）是可选演示，不改变计算口径。
 
-> 当前版本为 **v3.5.0 Public Beta**，安装包见 [Releases 页面](https://github.com/MaxHou-infinity/puffline-planner/releases/tag/v3.5.0)。仿真结果用于方案预评估，不替代现场测时、工艺验证、质量验证或法规合规判断。
+> 当前版本为 **v3.5.1 Public Beta**，安装包见 [Releases 页面](https://github.com/MaxHou-infinity/puffline-planner/releases/tag/v3.5.1)。仿真结果用于方案预评估，不替代现场测时、工艺验证、质量验证或法规合规判断。
 
 ![v3.5.0 清爽专业桌面界面](docs/images/v3.5.0-modern-main.png)
 
@@ -53,7 +53,7 @@ flowchart LR
 
 ## 适用流程与模板
 
-v3.5.0 面向消费类硬件装配的产能与人力方案预评估。通用合成模板支持
+v3.5.1 面向消费类硬件装配的产能与人力方案预评估。通用合成模板支持
 零件装配、焊接、功能测试、组装与包装；参数须用现场测时校准。
 
 | 执行模型 | 默认单位 | 能力边界 |
